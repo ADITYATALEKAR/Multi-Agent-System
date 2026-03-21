@@ -11,33 +11,40 @@ Implements:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import structlog
 from pydantic import BaseModel, Field
 
-from src.coordination.agents.base import BaseAgent, HEARTBEAT_TIMEOUT_S
-from src.coordination.blackboard import BlackboardManager
-from src.coordination.bidding import BiddingProtocol
-from src.coordination.reliability import AgentReliabilityTracker
 from src.coordination.arbitration import ConflictArbitrator, StalemateBreaker
-from src.coordination.execution_policy import ExecutionPolicy, Operation
+from src.coordination.bidding import BiddingProtocol
+from src.coordination.blackboard import BlackboardManager
 from src.coordination.bus import MessageBus
+from src.coordination.execution_policy import ExecutionPolicy
+from src.coordination.reliability import AgentReliabilityTracker
 from src.core.coordination import (
-    AgentBid,
-    Claim,
-    ResourceBudget,
     WorkItem,
     WorkItemStatus,
 )
+
+if TYPE_CHECKING:
+    from src.coordination.agents.base import BaseAgent
 
 logger = structlog.get_logger()
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize naive and aware datetimes to UTC for comparisons."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
 
 # v3.3 Fix 6: Triage thresholds
 TRIAGE_ENTRY_PCT = 0.90
@@ -58,7 +65,7 @@ class TriageState(BaseModel):
     """Tracks triage mode state with hysteresis."""
 
     active: bool = False
-    entered_at: Optional[datetime] = None
+    entered_at: datetime | None = None
     last_check: datetime = Field(default_factory=utc_now)
 
 
@@ -217,18 +224,16 @@ class Orchestrator:
 
         # Collect bids from capable agents
         for agent in self._agents.values():
-            if not self._bidding.reserve_slot(item.item_id):
-                break  # At slot capacity
-
             bid = agent.bid(item)
             if bid:
                 # Inject reliability score
-                bid = bid.model_copy(update={
-                    "agent_reliability": self._reliability.get_reliability(agent.agent_id),
-                })
-                self._bidding.submit_bid(bid)
-            else:
-                self._bidding.release_slot(item.item_id)
+                bid = bid.model_copy(
+                    update={
+                        "agent_reliability": self._reliability.get_reliability(agent.agent_id),
+                    }
+                )
+                if not self._bidding.submit_bid(bid):
+                    break  # At slot capacity
 
         # Evaluate bids
         winner = self._bidding.evaluate_bids(item.item_id)
@@ -250,10 +255,13 @@ class Orchestrator:
         if not claimed:
             return
 
-        self._blackboard.update_item(item.item_id, {
-            "status": WorkItemStatus.IN_PROGRESS,
-            "last_heartbeat": utc_now(),
-        })
+        self._blackboard.update_item(
+            item.item_id,
+            {
+                "status": WorkItemStatus.IN_PROGRESS,
+                "last_heartbeat": utc_now(),
+            },
+        )
 
         agent = self._agents.get(agent_id)
         if not agent:
@@ -294,10 +302,13 @@ class Orchestrator:
                 # Release any items claimed by this agent
                 for item in self._blackboard.get_items_by_status(WorkItemStatus.IN_PROGRESS):
                     if item.claimed_by == agent_id:
-                        self._blackboard.update_item(item.item_id, {
-                            "status": WorkItemStatus.OPEN,
-                            "claimed_by": None,
-                        })
+                        self._blackboard.update_item(
+                            item.item_id,
+                            {
+                                "status": WorkItemStatus.OPEN,
+                                "claimed_by": None,
+                            },
+                        )
 
     # ── Escalation timeout (v3.3 D2) ──
 
@@ -307,7 +318,7 @@ class Orchestrator:
         cutoff = now - timedelta(seconds=ESCALATION_TIMEOUT_S)
 
         for item in self._blackboard.get_items_by_status(WorkItemStatus.CLAIMED):
-            if item.last_heartbeat < cutoff:
+            if _as_utc(item.last_heartbeat) < cutoff:
                 logger.warning(
                     "escalation_timeout",
                     item_id=str(item.item_id),
@@ -335,7 +346,7 @@ class Orchestrator:
         else:
             # Check minimum dwell time
             if self._triage.entered_at:
-                dwell = (now - self._triage.entered_at).total_seconds()
+                dwell = (now - _as_utc(self._triage.entered_at)).total_seconds()
                 if dwell < TRIAGE_MIN_DWELL_S:
                     return  # Too early to exit
 

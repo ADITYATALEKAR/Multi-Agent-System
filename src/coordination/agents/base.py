@@ -9,14 +9,16 @@ Implements:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
-from typing import Any, Optional
-from uuid import UUID
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from pydantic import BaseModel, Field
 
 from src.core.coordination import AgentBid, ResourceBudget, WorkItem
+
+if TYPE_CHECKING:
+    from uuid import UUID
 
 logger = structlog.get_logger()
 
@@ -24,7 +26,14 @@ HEARTBEAT_TIMEOUT_S = 60  # v3.3 D3
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize naive and aware datetimes to UTC for comparisons."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 class AgentStatus(BaseModel):
@@ -32,10 +41,13 @@ class AgentStatus(BaseModel):
 
     agent_id: str
     state: str = "idle"  # idle, working, stopped
-    current_work_item: Optional[UUID] = None
+    current_work_item: UUID | None = None
     last_heartbeat: datetime = Field(default_factory=utc_now)
     tasks_completed: int = 0
     tasks_failed: int = 0
+
+
+AgentStatus.model_rebuild(_types_namespace={"UUID": __import__("uuid").UUID})
 
 
 class BaseAgent(ABC):
@@ -72,7 +84,7 @@ class BaseAgent(ABC):
 
     def is_alive(self) -> bool:
         """Check if agent's heartbeat is within timeout."""
-        elapsed = (utc_now() - self._status.last_heartbeat).total_seconds()
+        elapsed = (utc_now() - _as_utc(self._status.last_heartbeat)).total_seconds()
         return elapsed < HEARTBEAT_TIMEOUT_S and not self._stopped
 
     def can_handle(self, item: WorkItem) -> bool:

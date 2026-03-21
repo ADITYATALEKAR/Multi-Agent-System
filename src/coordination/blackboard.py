@@ -10,14 +10,15 @@ Implements:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
-from uuid import UUID
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 import structlog
-from pydantic import BaseModel, Field
 
 from src.core.coordination import Claim, Question, WorkItem, WorkItemStatus
+
+if TYPE_CHECKING:
+    from uuid import UUID
 
 logger = structlog.get_logger()
 
@@ -29,7 +30,14 @@ STALE_WORK_ITEM_AGE_S = 3600  # 1 hour
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize naive and aware datetimes to UTC for comparisons."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 class BlackboardManager:
@@ -74,13 +82,15 @@ class BlackboardManager:
             List of open work items sorted by priority descending.
         """
         items = [
-            item for item in self._work_items.values()
+            item
+            for item in self._work_items.values()
             if item.status in (WorkItemStatus.OPEN, WorkItemStatus.BIDDING)
         ]
 
         if capabilities:
             items = [
-                item for item in items
+                item
+                for item in items
                 if not item.required_capabilities or (capabilities & item.required_capabilities)
             ]
 
@@ -102,15 +112,15 @@ class BlackboardManager:
 
     def complete_work_item(self, item_id: UUID, result: Any = None) -> None:
         """Mark a work item as complete with an optional result."""
-        self.update_item(item_id, {
-            "status": WorkItemStatus.COMPLETE,
-            "result": result,
-        })
+        self.update_item(
+            item_id,
+            {
+                "status": WorkItemStatus.COMPLETE,
+                "result": result,
+            },
+        )
         # Clean up claims for this item
-        self._claims = {
-            cid: c for cid, c in self._claims.items()
-            if c.work_item_id != item_id
-        }
+        self._claims = {cid: c for cid, c in self._claims.items() if c.work_item_id != item_id}
 
     def fail_work_item(self, item_id: UUID) -> None:
         """Mark a work item as failed."""
@@ -118,20 +128,26 @@ class BlackboardManager:
         if not item:
             return
         if item.attempt_count < item.max_attempts:
-            self.update_item(item_id, {
-                "status": WorkItemStatus.OPEN,
-                "claimed_by": None,
-                "attempt_count": item.attempt_count + 1,
-            })
+            self.update_item(
+                item_id,
+                {
+                    "status": WorkItemStatus.OPEN,
+                    "claimed_by": None,
+                    "attempt_count": item.attempt_count + 1,
+                },
+            )
         else:
             self.update_item(item_id, {"status": WorkItemStatus.FAILED})
 
     def abandon_work_item(self, item_id: UUID) -> None:
         """Mark a work item as ABANDONED (v3.3 D2)."""
-        self.update_item(item_id, {
-            "status": WorkItemStatus.ABANDONED,
-            "claimed_by": None,
-        })
+        self.update_item(
+            item_id,
+            {
+                "status": WorkItemStatus.ABANDONED,
+                "claimed_by": None,
+            },
+        )
 
     # ── Claim operations ──
 
@@ -173,11 +189,14 @@ class BlackboardManager:
         if claim_id is None:
             return False
 
-        self.update_item(item_id, {
-            "status": WorkItemStatus.CLAIMED,
-            "claimed_by": agent_id,
-            "last_heartbeat": utc_now(),
-        })
+        self.update_item(
+            item_id,
+            {
+                "status": WorkItemStatus.CLAIMED,
+                "claimed_by": agent_id,
+                "last_heartbeat": utc_now(),
+            },
+        )
         return True
 
     def get_claims_for_item(self, item_id: UUID) -> list[Claim]:
@@ -228,21 +247,23 @@ class BlackboardManager:
         # Stale work items (heartbeat timeout)
         for item_id, item in list(self._work_items.items()):
             if item.status in (WorkItemStatus.CLAIMED, WorkItemStatus.IN_PROGRESS):
-                elapsed = (now - item.last_heartbeat).total_seconds()
+                elapsed = (now - _as_utc(item.last_heartbeat)).total_seconds()
                 if elapsed > STALE_CLEANUP_INTERVAL_S:
-                    self.update_item(item_id, {
-                        "status": WorkItemStatus.OPEN,
-                        "claimed_by": None,
-                    })
+                    self.update_item(
+                        item_id,
+                        {
+                            "status": WorkItemStatus.OPEN,
+                            "claimed_by": None,
+                        },
+                    )
                     # Remove associated claims
                     self._claims = {
-                        cid: c for cid, c in self._claims.items()
-                        if c.work_item_id != item_id
+                        cid: c for cid, c in self._claims.items() if c.work_item_id != item_id
                     }
                     cleaned += 1
 
         # Stale questions (>1 hour unresolved)
-        for qid, q in list(self._questions.items()):
+        for _qid, q in list(self._questions.items()):
             if not q.resolved:
                 # Questions don't have timestamps by default, skip age check
                 pass

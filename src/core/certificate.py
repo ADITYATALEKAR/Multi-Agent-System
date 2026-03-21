@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
-from src.core.counterfactual import CounterfactualScenario
+from src.core.counterfactual import CounterfactualScenario as _CounterfactualScenario
+
+if TYPE_CHECKING:
+    from src.core.counterfactual import CounterfactualScenario
 
 
 class SolverResult(BaseModel):
@@ -16,8 +19,8 @@ class SolverResult(BaseModel):
 
     solver_id: str
     query: str
-    satisfiable: Optional[bool] = None
-    model: Optional[dict[str, Any]] = None
+    satisfiable: bool | None = None
+    model: dict[str, Any] | None = None
     duration_ms: float = 0.0
     complexity_class: str = "simple"
 
@@ -68,3 +71,8 @@ class DiagnosisCertificate(BaseModel):
     # v3.3 Fix 4
     mandatory_ops_executed: list[str] = Field(default_factory=list)
     floor_budget_consumed_pct: float = 0.0
+
+
+DiagnosisCertificate.model_rebuild(
+    _types_namespace={"CounterfactualScenario": _CounterfactualScenario}
+)

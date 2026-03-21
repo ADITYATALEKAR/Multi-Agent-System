@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from pathlib import Path
 import threading
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
-from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -27,7 +26,7 @@ from src.core.coordination import WorkItem, WorkItemStatus
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class RuntimeViolation(BaseModel):
@@ -201,6 +200,24 @@ class MASIRuntime:
         self._save_state()
         return task
 
+    def enqueue_analysis(self, repo_path: str, tenant_id: str = "default") -> RuntimeTask:
+        """Persist a pending analysis task without executing it inline.
+
+        The API uses this queued mode when clients explicitly provide
+        scheduling metadata; it keeps the REST contract asynchronous while the
+        CLI and local runtime can still use the synchronous submit path.
+        """
+        target = Path(repo_path).expanduser().resolve()
+        task = RuntimeTask(
+            task_id=self._next_task_id(),
+            tenant_id=tenant_id,
+            repo_path=str(target),
+            status="pending",
+        )
+        self._state.tasks[task.task_id] = task
+        self._save_state()
+        return task
+
     def get_task(self, task_id: str) -> RuntimeTask | None:
         return self._state.tasks.get(task_id)
 
@@ -308,7 +325,9 @@ class MASIRuntime:
         return RuntimeWorkItem(
             item_id=str(item.item_id),
             task_type=item.task_type,
-            status=item.status.value if isinstance(item.status, WorkItemStatus) else str(item.status),
+            status=item.status.value
+            if isinstance(item.status, WorkItemStatus)
+            else str(item.status),
             result=result,
         )
 

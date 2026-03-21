@@ -7,11 +7,14 @@ entities, with simplified loopy belief-propagation for posterior inference.
 from __future__ import annotations
 
 from collections import deque
-from typing import Optional
-from uuid import UUID
+from typing import TYPE_CHECKING
+from uuid import UUID as _UUID
 
 import structlog
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from uuid import UUID
 
 logger = structlog.get_logger(__name__)
 
@@ -34,6 +37,10 @@ class CBNEdge(BaseModel):
     source: UUID
     target: UUID
     weight: float = Field(ge=0.0, default=1.0)
+
+
+CBNNode.model_rebuild(_types_namespace={"UUID": _UUID})
+CBNEdge.model_rebuild(_types_namespace={"UUID": _UUID})
 
 
 # ── CausalBayesianNetwork ────────────────────────────────────────────────────
@@ -59,9 +66,7 @@ class CausalBayesianNetwork:
 
     # ── Mutators ──────────────────────────────────────────────────────
 
-    def add_node(
-        self, node_id: UUID, node_type: str, prior: float = 0.5
-    ) -> None:
+    def add_node(self, node_id: UUID, node_type: str, prior: float = 0.5) -> None:
         """Add a variable node to the network.
 
         Args:
@@ -78,8 +83,7 @@ class CausalBayesianNetwork:
 
         if len(self._nodes) >= MAX_NODES:
             raise ValueError(
-                f"CBN node cap reached ({MAX_NODES}). "
-                "Reduce scope before adding more nodes."
+                f"CBN node cap reached ({MAX_NODES}). Reduce scope before adding more nodes."
             )
 
         node = CBNNode(node_id=node_id, node_type=node_type, prior=prior)
@@ -93,9 +97,7 @@ class CausalBayesianNetwork:
             prior=prior,
         )
 
-    def add_edge(
-        self, source: UUID, target: UUID, weight: float = 1.0
-    ) -> None:
+    def add_edge(self, source: UUID, target: UUID, weight: float = 1.0) -> None:
         """Add a directed causal edge from *source* to *target*.
 
         Both endpoints must already exist in the network.
@@ -131,7 +133,7 @@ class CausalBayesianNetwork:
 
     # ── Queries ───────────────────────────────────────────────────────
 
-    def get_node(self, node_id: UUID) -> Optional[dict]:
+    def get_node(self, node_id: UUID) -> dict | None:
         """Return node info dict or ``None`` if the node is absent."""
         node = self._nodes.get(node_id)
         if node is None:
@@ -175,9 +177,7 @@ class CausalBayesianNetwork:
         in_degree: dict[UUID, int] = {
             nid: len(self._parents.get(nid, set())) for nid in self._nodes
         }
-        queue: deque[UUID] = deque(
-            nid for nid, deg in in_degree.items() if deg == 0
-        )
+        queue: deque[UUID] = deque(nid for nid, deg in in_degree.items() if deg == 0)
         order: list[UUID] = []
 
         while queue:
@@ -227,9 +227,7 @@ class CausalBayesianNetwork:
             return {}
 
         # Initialise beliefs from priors
-        belief: dict[UUID, float] = {
-            nid: node.prior for nid, node in self._nodes.items()
-        }
+        belief: dict[UUID, float] = {nid: node.prior for nid, node in self._nodes.items()}
 
         # Clamp evidence
         for nid, val in evidence.items():

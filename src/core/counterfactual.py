@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import enum
-from typing import Optional
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
-from src.core.fact import DeltaOp, GraphDelta
+from src.core.fact import DeltaOp as _DeltaOp
+from src.core.fact import GraphDelta as _GraphDelta
+
+if TYPE_CHECKING:
+    from src.core.fact import DeltaOp, GraphDelta
 
 
-class InterventionType(str, enum.Enum):
+class InterventionType(enum.StrEnum):
     REMOVE_DELTA = "remove_delta"
     MODIFY_DELTA = "modify_delta"
     INJECT_DELTA = "inject_delta"
 
 
-class CounterfactualConclusion(str, enum.Enum):
+class CounterfactualConclusion(enum.StrEnum):
     CAUSES_SYMPTOM = "causes_symptom"
     DOES_NOT_CAUSE = "does_not_cause"
     INCONCLUSIVE = "inconclusive"
@@ -28,7 +32,7 @@ class Intervention(BaseModel):
 
     intervention_type: InterventionType
     target_deltas: list[UUID] = Field(default_factory=list)
-    replacement: Optional[list[DeltaOp]] = None
+    replacement: list[DeltaOp] | None = None
 
 
 class CounterfactualScenario(BaseModel):
@@ -47,3 +51,9 @@ class CounterfactualScenario(BaseModel):
     boundary_size: int = 0  # v3.3 Fix 2
     expansion_count: int = 0  # v3.3 Fix 2
     expansion_triggers: list[str] = Field(default_factory=list)  # v3.3 Fix 2
+
+
+Intervention.model_rebuild(_types_namespace={"DeltaOp": _DeltaOp})
+CounterfactualScenario.model_rebuild(
+    _types_namespace={"DeltaOp": _DeltaOp, "GraphDelta": _GraphDelta}
+)

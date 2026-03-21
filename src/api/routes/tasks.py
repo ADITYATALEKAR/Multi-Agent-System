@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 import structlog
 from fastapi import APIRouter, HTTPException
@@ -19,14 +19,15 @@ router = APIRouter(prefix="/api/v1", tags=["tasks"])
 # Enums
 # ---------------------------------------------------------------------------
 
-class TaskStatus(str, Enum):
+
+class TaskStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
 
 
-class TaskPriority(str, Enum):
+class TaskPriority(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
@@ -36,6 +37,7 @@ class TaskPriority(str, Enum):
 # ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
+
 
 class TaskSubmitRequest(BaseModel):
     task_type: str = Field(..., description="Type of analysis task to run")
@@ -149,7 +151,11 @@ def submit_task(request: TaskSubmitRequest) -> TaskSubmitResponse:
     runtime = get_runtime()
     if request.task_type not in {"analysis", "repo_map"}:
         raise HTTPException(status_code=400, detail=f"Unsupported task type: {request.task_type}")
-    task = runtime.submit_analysis(request.repo_path, tenant_id=request.tenant_id)
+    explicit_scheduler_fields = request.model_fields_set - {"task_type"}
+    if explicit_scheduler_fields:
+        task = runtime.enqueue_analysis(request.repo_path, tenant_id=request.tenant_id)
+    else:
+        task = runtime.submit_analysis(request.repo_path, tenant_id=request.tenant_id)
 
     log.info(
         "task_submitted",

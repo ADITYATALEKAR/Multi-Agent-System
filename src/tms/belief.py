@@ -7,13 +7,16 @@ confidence, justifications, and dependency links to other beliefs.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import structlog
 from pydantic import BaseModel, Field
 
-from src.core.derived import ExtendedJustification
+from src.core.derived import ExtendedJustification as _ExtendedJustification
+
+if TYPE_CHECKING:
+    from src.core.derived import ExtendedJustification
 
 logger = structlog.get_logger(__name__)
 
@@ -79,7 +82,7 @@ class BeliefNode(BaseModel):
                 change_count=self.status_change_count,
             )
 
-    def remove_justification(self, justification_id: UUID) -> Optional[ExtendedJustification]:
+    def remove_justification(self, justification_id: UUID) -> ExtendedJustification | None:
         """Remove a justification by its ID.
 
         If no justifications remain, the status transitions to OUT.
@@ -87,7 +90,7 @@ class BeliefNode(BaseModel):
         Returns:
             The removed justification, or ``None`` if not found.
         """
-        removed: Optional[ExtendedJustification] = None
+        removed: ExtendedJustification | None = None
         new_justifications: list[ExtendedJustification] = []
         for j in self.justifications:
             if j.justification_id == justification_id:
@@ -122,3 +125,6 @@ class BeliefNode(BaseModel):
             )
 
         return removed
+
+
+BeliefNode.model_rebuild(_types_namespace={"ExtendedJustification": _ExtendedJustification})

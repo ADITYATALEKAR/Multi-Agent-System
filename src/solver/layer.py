@@ -7,7 +7,6 @@ automatic fallback to heuristic solvers when the primary solver times out.
 from __future__ import annotations
 
 import time
-from typing import Optional
 
 import structlog
 import z3
@@ -18,6 +17,8 @@ from src.solver.fallback import ReteFallback
 from src.solver.translator import TranslationError, Z3Translator
 
 logger = structlog.get_logger(__name__)
+
+_MIN_Z3_TIMEOUT_MS = 250.0
 
 
 class ConstraintSolverLayer:
@@ -33,8 +34,8 @@ class ConstraintSolverLayer:
 
     def __init__(
         self,
-        translator: Optional[Z3Translator] = None,
-        budget: Optional[SolverBudget] = None,
+        translator: Z3Translator | None = None,
+        budget: SolverBudget | None = None,
     ) -> None:
         """Initialize the solver layer.
 
@@ -62,7 +63,7 @@ class ConstraintSolverLayer:
     def check_satisfiability(
         self,
         constraints: list[str],
-        budget: Optional[SolverBudget] = None,
+        budget: SolverBudget | None = None,
     ) -> SolverResult:
         """Check satisfiability of a set of SMT-LIB2 constraints.
 
@@ -93,6 +94,7 @@ class ConstraintSolverLayer:
         # Determine complexity heuristic based on constraint count
         complexity = self._estimate_complexity(constraints)
         timeout_ms = active_budget.allocate(complexity)
+        solver_timeout_ms = self._effective_timeout_ms(timeout_ms, active_budget.remaining_ms())
 
         if timeout_ms <= 0:
             logger.warning("solver_zero_budget_allocated", complexity=complexity.value)
@@ -109,7 +111,7 @@ class ConstraintSolverLayer:
             return self._run_fallback(constraints, query_str, complexity)
 
         solver = z3.Solver()
-        solver.set("timeout", int(timeout_ms))
+        solver.set("timeout", int(solver_timeout_ms))
         for c in z3_constraints:
             solver.add(c)
 
@@ -119,9 +121,7 @@ class ConstraintSolverLayer:
 
         if result == z3.sat:
             model = solver.model()
-            model_dict = {
-                str(d): str(model[d]) for d in model.decls()
-            }
+            model_dict = {str(d): str(model[d]) for d in model.decls()}
             logger.info(
                 "solver_sat",
                 duration_ms=round(duration_ms, 2),
@@ -151,6 +151,7 @@ class ConstraintSolverLayer:
                 "solver_unknown_falling_back",
                 duration_ms=round(duration_ms, 2),
                 reason=solver.reason_unknown(),
+                solver_timeout_ms=round(solver_timeout_ms, 2),
             )
             return self._run_fallback(constraints, query_str, complexity)
 
@@ -198,6 +199,20 @@ class ConstraintSolverLayer:
             return ComplexityClass.MODERATE
         else:
             return ComplexityClass.COMPLEX
+
+    @staticmethod
+    def _effective_timeout_ms(allocated_ms: float, remaining_ms: float) -> float:
+        """Give Z3 a small minimum wall-clock budget on trivial problems.
+
+        The budget layer still classifies calls by complexity, but in practice
+        parsing + solver startup can exceed a 50ms allocation on slower CI
+        machines even for obviously satisfiable formulas. We therefore keep the
+        accounting allocation unchanged while enforcing a modest minimum timeout
+        for the actual Z3 invocation, capped by the remaining overall budget.
+        """
+        if allocated_ms <= 0.0 or remaining_ms <= 0.0:
+            return 0.0
+        return min(max(allocated_ms, _MIN_Z3_TIMEOUT_MS), remaining_ms)
 
     def _run_fallback(
         self,

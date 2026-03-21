@@ -7,12 +7,14 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from src.coordination.agents.base import BaseAgent
-from src.core.coordination import WorkItem
+
+if TYPE_CHECKING:
+    from src.core.coordination import WorkItem
 
 logger = structlog.get_logger(__name__)
 
@@ -69,7 +71,20 @@ class RepoMapperAgent(BaseAgent):
 
     def _fallback_map(self, item: WorkItem) -> dict[str, Any]:
         payload = item.payload if isinstance(item.payload, dict) else {}
-        raw_path = payload.get("path") or "."
+        raw_path = payload.get("path")
+        if not raw_path:
+            return {
+                "nodes_mapped": len(item.scope),
+                "repo_summary": {
+                    "path": "",
+                    "exists": False,
+                    "files_scanned": len(item.scope),
+                    "directories_scanned": 0,
+                    "top_extensions": [],
+                    "sample_files": [],
+                },
+            }
+
         repo_path = Path(str(raw_path)).expanduser()
 
         if not repo_path.exists():
@@ -100,8 +115,7 @@ class RepoMapperAgent(BaseAgent):
 
         ext_counter = Counter(path.suffix.lower() or "<no_ext>" for path in files)
         top_extensions = [
-            {"extension": ext, "count": count}
-            for ext, count in ext_counter.most_common(10)
+            {"extension": ext, "count": count} for ext, count in ext_counter.most_common(10)
         ]
         summary = {
             "path": str(repo_path.resolve()),

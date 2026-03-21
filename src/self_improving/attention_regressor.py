@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from uuid import UUID
+from datetime import datetime as _datetime
+from typing import TYPE_CHECKING
+from uuid import UUID as _UUID
 
 import structlog
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from datetime import datetime
+    from uuid import UUID
 
 log = structlog.get_logger(__name__)
 
@@ -31,6 +36,9 @@ class RegressionResult(BaseModel):
     r_squared: float
     samples_used: int
     converged: bool
+
+
+AttentionSample.model_rebuild(_types_namespace={"UUID": _UUID, "datetime": _datetime})
 
 
 # ── Regressor ──────────────────────────────────────────────────────────────
@@ -158,9 +166,7 @@ class AttentionRegressor:
 
         The result is clamped to [0, 1].
         """
-        total = sum(
-            self._weights.get(f, 0.0) * v for f, v in features.items()
-        )
+        total = sum(self._weights.get(f, 0.0) * v for f, v in features.items())
         return max(0.0, min(1.0, total))
 
     # ── Accessors / reset ──────────────────────────────────────────────
