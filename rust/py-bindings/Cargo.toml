@@ -1,0 +1,14 @@
+[package]
+name = "py-bindings"
+version = "0.1.0"
+edition = "2021"
+description = "PyO3 Python bindings for Rust crates"
+
+[lib]
+name = "blueprint_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+reasoning-graph = { path = "../reasoning-graph" }
+wl-hash = { path = "../wl-hash" }

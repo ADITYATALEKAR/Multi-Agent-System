@@ -1,0 +1,14 @@
+# Blueprint System — Development Overrides
+
+system:
+  environment: "development"
+  log_level: "DEBUG"
+
+observability:
+  tracing_sample_rate: 1.0
+
+coordination:
+  triage_mode_enabled: false
+
+cost_aware:
+  max_solver_budget_ms: 30000

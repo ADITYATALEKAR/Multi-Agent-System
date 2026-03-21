@@ -1,0 +1,117 @@
+[build-system]
+requires = ["hatchling", "maturin>=1.0,<2.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "blueprint-system"
+version = "0.1.0"
+description = "State-Centric Multi-Agent Software Intelligence System"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [
+    { name = "Aditya Talekar" },
+]
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "asyncpg>=0.29.0",
+    "structlog>=23.0",
+    "neo4j>=5.0",
+    "redis>=5.0",
+    "nats-py>=2.0",
+    "z3-solver>=4.12",
+    "tree-sitter>=0.20",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "typer>=0.9",
+    "rich>=13.0",
+    "prometheus-client>=0.20",
+    "msgpack>=1.0",
+    "xxhash>=3.0",
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "pyyaml>=6.0",
+    "alembic>=1.13",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "hypothesis>=6.0",
+    "ruff>=0.3",
+    "mypy>=1.8",
+    "import-linter>=2.0",
+    "locust>=2.0",
+    "maturin>=1.0",
+]
+
+[project.scripts]
+blueprint = "src.cli.main:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "SIM", "TCH"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests (require Docker services)",
+    "stress: Stress tests",
+    "chaos: Chaos engineering tests",
+    "accuracy: Accuracy regression tests",
+]
+
+[tool.importlinter]
+root_packages = ["src"]
+
+[[tool.importlinter.contracts]]
+name = "Core has no internal dependencies"
+type = "independence"
+modules = ["src.core"]
+
+[[tool.importlinter.contracts]]
+name = "No circular imports"
+type = "layers"
+layers = [
+    "src.api",
+    "src.cli",
+    "src.coordination",
+    "src.executor",
+    "src.policy",
+    "src.repair",
+    "src.hypothesis_engine",
+    "src.causal",
+    "src.counterfactual",
+    "src.solver",
+    "src.memory",
+    "src.iie",
+    "src.dfe",
+    "src.tms",
+    "src.law_engine",
+    "src.self_improving",
+    "src.cost_aware",
+    "src.scoring",
+    "src.osg",
+    "src.certificate",
+    "src.ingestion",
+    "src.analyzers",
+    "src.state_graph",
+    "src.observability",
+    "src.core",
+]

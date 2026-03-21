@@ -1,0 +1,11 @@
+[package]
+name = "reasoning-graph"
+version = "0.1.0"
+edition = "2021"
+description = "In-memory Reasoning Graph core for the Blueprint system"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }

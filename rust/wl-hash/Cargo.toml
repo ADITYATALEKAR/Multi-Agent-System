@@ -1,0 +1,9 @@
+[package]
+name = "wl-hash"
+version = "0.1.0"
+edition = "2021"
+description = "Weisfeiler-Lehman graph hashing for structural fingerprinting"
+
+[dependencies]
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+uuid = { version = "1", features = ["v4"] }

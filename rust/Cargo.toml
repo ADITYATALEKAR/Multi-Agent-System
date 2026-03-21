@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "reasoning-graph",
+    "wl-hash",
+    "py-bindings",
+]
+resolver = "2"

@@ -1,0 +1,44 @@
+# Blueprint System — Schema Version Registry
+# Tracks current schema version for all persistent stores.
+# Increment on breaking format changes. Consumers MUST reject unknown versions.
+
+schemas:
+  graph_delta:
+    current_version: 1
+    description: "GraphDelta and DeltaOp format"
+    introduced: "0.1.0"
+
+  delta_log:
+    current_version: 1
+    description: "PostgreSQL delta_log table schema"
+    introduced: "0.1.0"
+
+  delta_entities:
+    current_version: 1
+    description: "PostgreSQL delta_entities table schema"
+    introduced: "0.1.0"
+
+  neo4j_graph:
+    current_version: 1
+    description: "Neo4j node/edge label and property schema"
+    introduced: "0.1.0"
+
+  reasoning_graph_checkpoint:
+    current_version: 1
+    description: "MessagePack checkpoint format for ReasoningGraph"
+    introduced: "0.1.0"
+
+  derived_fact:
+    current_version: 1
+    description: "DerivedFact storage format"
+    introduced: "0.1.0"
+
+  causal_template:
+    current_version: 1
+    description: "Causal template storage format"
+    introduced: "0.1.0"
+
+  diagnosis_certificate:
+    current_version: 1
+    description: "DiagnosisCertificate output format"
+    introduced: "0.1.0"

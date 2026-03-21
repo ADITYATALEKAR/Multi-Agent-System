@@ -1,0 +1,15 @@
+FROM rust:1.77-slim as builder
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y python3-dev && rm -rf /var/lib/apt/lists/*
+RUN pip install maturin
+
+COPY rust/ rust/
+COPY Cargo.toml .
+
+RUN cd rust/py-bindings && maturin build --release
+
+FROM python:3.12-slim
+COPY --from=builder /app/target/wheels/*.whl /tmp/
+RUN pip install /tmp/*.whl && rm /tmp/*.whl

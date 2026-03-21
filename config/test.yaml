@@ -1,0 +1,26 @@
+# Blueprint System — Test Overrides
+
+system:
+  environment: "test"
+  log_level: "WARNING"
+
+postgres:
+  database: "blueprint_test"
+
+neo4j:
+  uri: "bolt://localhost:7687"
+
+redis:
+  url: "redis://localhost:6379/1"
+
+observability:
+  metrics_enabled: false
+  tracing_enabled: false
+  tracing_sample_rate: 0.0
+
+coordination:
+  heartbeat_timeout_seconds: 5
+  bidding_timeout_seconds: 1
+
+solver:
+  budget_ms: 1000

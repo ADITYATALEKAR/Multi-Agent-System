@@ -1,0 +1,131 @@
+# Blueprint System — Default Configuration
+# Override via config/dev.yaml, config/test.yaml, or env vars: BLUEPRINT__{section}__{key}
+
+system:
+  name: "blueprint-system"
+  version: "0.1.0"
+  environment: "production"
+  log_level: "INFO"
+  log_format: "json"
+
+postgres:
+  host: "localhost"
+  port: 5432
+  database: "blueprint"
+  user: "blueprint"
+  password: "blueprint_dev"
+  pool_min_size: 5
+  pool_max_size: 20
+
+neo4j:
+  uri: "bolt://localhost:7687"
+  user: "neo4j"
+  password: "blueprint_dev"
+  max_connection_pool_size: 50
+
+redis:
+  url: "redis://localhost:6379/0"
+  max_connections: 20
+
+nats:
+  url: "nats://localhost:4222"
+  jetstream_enabled: true
+
+# Split Graph configuration
+state_graph:
+  delta_log:
+    batch_size: 100
+    flush_interval_ms: 500
+  query_graph:
+    cache_ttl_seconds: 300
+  reasoning_graph:
+    capacity: 100000
+    eviction_policy: "attention_weighted_lru"
+    checkpoint_interval_seconds: 300
+    checkpoint_recovery_target_seconds: 10
+
+# DFE (Dataflow Engine) configuration
+dfe:
+  max_rules: 10000
+  evaluation_timeout_ms: 50
+
+# TMS (Truth Maintenance System) configuration
+tms:
+  revision_timeout_ms: 20
+  max_retraction_depth: 100
+
+# Law Engine configuration
+law_engine:
+  bootstrap_timeout_seconds: 120
+  max_rules: 200
+  quarantine_threshold: 3
+
+# Hypothesis Engine configuration
+hypothesis_engine:
+  generation_timeout_seconds: 60
+  max_strategies: 6
+  strategy_parallel: true
+
+# Counterfactual Engine configuration
+counterfactual:
+  simulation_timeout_seconds: 5
+  max_boundary_size: 10000
+  max_expansion_count: 3
+
+# Solver configuration
+solver:
+  budget_ms: 5000
+  complexity_classes: ["simple", "moderate", "complex"]
+  fallback_enabled: true
+
+# Memory configuration
+memory:
+  episodic_retention_days: 90
+  causal_template_max: 10000
+  memoization_cache_size: 50000
+
+# Coordination configuration
+coordination:
+  heartbeat_interval_seconds: 30
+  heartbeat_timeout_seconds: 90
+  max_agents: 20
+  bidding_timeout_seconds: 5
+  triage_mode_enabled: false
+
+# Self-improving configuration
+self_improving:
+  learning_rate: 0.01
+  update_interval_seconds: 3600
+
+# Cost-aware configuration
+cost_aware:
+  budget_tracking_enabled: true
+  max_solver_budget_ms: 10000
+
+# API configuration
+api:
+  host: "0.0.0.0"
+  port: 8000
+  read_timeout_ms: 500
+  diagnostic_timeout_ms: 2000
+
+# Observability configuration
+observability:
+  metrics_enabled: true
+  metrics_port: 9090
+  tracing_enabled: true
+  tracing_sample_rate: 1.0
+  tracing_exporter: "otlp"
+
+# SLO targets (v3.3 E3)
+slo:
+  delta_append_p99_ms: 10
+  reasoning_graph_delta_p99_ms: 2
+  dfe_incremental_p99_ms: 50
+  tms_revision_p99_ms: 20
+  law_bootstrap_max_seconds: 120
+  hypothesis_generation_max_seconds: 60
+  counterfactual_simulation_max_seconds: 5
+  api_read_p99_ms: 500
+  api_diagnostic_p99_ms: 2000
+  availability_target: 0.995

@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+.venv312/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+*.code-workspace
+
+# Rust
+target/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+!.env.example
+.env.local
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+credentials.json
+
+# Docker
+docker-compose.override.yml
+
+# Local runtime and temp data
+.masi_runtime/
+temp/
+*.pid
+_*.txt
+
+# Node / VS Code extension build artifacts
+**/node_modules/
+**/out/
+*.vsix

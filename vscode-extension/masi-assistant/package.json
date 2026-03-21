@@ -1,0 +1,113 @@
+{
+  "name": "mas-agent",
+  "displayName": "MAS",
+  "description": "Install and control the MAS multi-agent system from VS Code.",
+  "version": "0.0.1",
+  "publisher": "aditya-local",
+  "license": "SEE LICENSE IN LICENSE.txt",
+  "icon": "media/mas-icon.png",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "galleryBanner": {
+    "color": "#101722",
+    "theme": "dark"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "multi-agent",
+    "ai",
+    "software-analysis",
+    "architecture",
+    "developer-tools"
+  ],
+  "qna": "marketplace",
+  "activationEvents": [
+    "onView:masi.sidebar",
+    "onCommand:masi.installRuntime",
+    "onCommand:masi.startApi",
+    "onCommand:masi.healthCheck",
+    "onCommand:masi.analyzeWorkspace",
+    "onCommand:masi.showLastTask",
+    "onCommand:masi.refreshSidebar"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "masi.installRuntime",
+        "title": "MAS: Install Runtime"
+      },
+      {
+        "command": "masi.startApi",
+        "title": "MAS: Start API"
+      },
+      {
+        "command": "masi.healthCheck",
+        "title": "MAS: Health Check"
+      },
+      {
+        "command": "masi.analyzeWorkspace",
+        "title": "MAS: Analyze Current Workspace"
+      },
+      {
+        "command": "masi.showLastTask",
+        "title": "MAS: Show Last Task"
+      },
+      {
+        "command": "masi.refreshSidebar",
+        "title": "MAS: Refresh Sidebar"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "masi",
+          "title": "MAS",
+          "icon": "media/masi.svg"
+        }
+      ]
+    },
+    "views": {
+      "masi": [
+        {
+          "id": "masi.sidebar",
+          "name": "Control Panel"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "MAS",
+      "properties": {
+        "masi.apiBaseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8000",
+          "description": "Base URL for the MAS API."
+        },
+        "masi.repoRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Filesystem path to the MAS repository. Leave blank to choose it on first run."
+        },
+        "masi.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Python executable used to launch the MAS API. Leave blank to let MAS derive it from the repo path."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/vscode": "^1.96.0",
+    "@vscode/vsce": "^3.7.1",
+    "typescript": "^5.7.2"
+  }
+}
