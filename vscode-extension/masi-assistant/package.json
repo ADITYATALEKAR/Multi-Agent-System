@@ -2,8 +2,8 @@
   "name": "mas-agent",
   "displayName": "MAS",
   "description": "Install and control the MAS multi-agent system from VS Code.",
-  "version": "0.0.1",
-  "publisher": "aditya-local",
+  "version": "0.0.2",
+  "publisher": "FundamentalLabs",
   "license": "SEE LICENSE IN LICENSE.txt",
   "icon": "media/mas-icon.png",
   "engines": {
@@ -23,9 +23,18 @@
     "architecture",
     "developer-tools"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ADITYATALEKAR/Multi-Agent-System.git"
+  },
+  "homepage": "https://github.com/ADITYATALEKAR/Multi-Agent-System#readme",
+  "bugs": {
+    "url": "https://github.com/ADITYATALEKAR/Multi-Agent-System/issues"
+  },
   "qna": "marketplace",
   "activationEvents": [
     "onView:masi.sidebar",
+    "onCommand:masi.openPanel",
     "onCommand:masi.installRuntime",
     "onCommand:masi.startApi",
     "onCommand:masi.healthCheck",
@@ -36,6 +45,10 @@
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
+      {
+        "command": "masi.openPanel",
+        "title": "MAS: Open Panel"
+      },
       {
         "command": "masi.installRuntime",
         "title": "MAS: Install Runtime"
@@ -74,7 +87,8 @@
       "masi": [
         {
           "id": "masi.sidebar",
-          "name": "Control Panel"
+          "name": "Control Panel",
+          "type": "webview"
         }
       ]
     },

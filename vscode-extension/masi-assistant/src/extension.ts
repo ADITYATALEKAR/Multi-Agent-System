@@ -42,6 +42,11 @@ interface RuntimeStatus {
   pythonExists: boolean;
 }
 
+interface PanelChatMessage {
+  role: "assistant" | "user";
+  text: string;
+}
+
 function getConfig() {
   const config = vscode.workspace.getConfiguration("masi");
   return {
@@ -127,6 +132,337 @@ function buildInstallCommands(repoRoot: string, pythonPath: string): string[] {
 
 function createOutputChannel(): vscode.OutputChannel {
   return vscode.window.createOutputChannel("MAS");
+}
+
+function getPanelHtml(webview: vscode.Webview, messages: PanelChatMessage[]): string {
+  const nonce = String(Date.now());
+  const logoUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(vscode.Uri.file(__dirname), "..", "media", "mas-icon.png"),
+  );
+  const transcript = messages.map((message) => `
+    <div class="message ${message.role}">
+      <div class="message-role">${message.role === "assistant" ? "MAS" : "You"}</div>
+      <div class="message-body">${escapeHtml(message.text)}</div>
+    </div>
+  `).join("");
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} https: data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MAS</title>
+  <style>
+    :root {
+      --bg: #111315;
+      --bg-2: #171b20;
+      --panel: rgba(26, 32, 39, 0.88);
+      --panel-2: rgba(18, 23, 29, 0.92);
+      --text: #f3f7fc;
+      --muted: #9fb0c5;
+      --accent: #4eb2ff;
+      --accent-2: #0d8bff;
+      --border: rgba(98, 128, 164, 0.22);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top center, rgba(78, 178, 255, 0.14), transparent 24%),
+        radial-gradient(circle at bottom center, rgba(13, 139, 255, 0.09), transparent 20%),
+        linear-gradient(180deg, var(--bg) 0%, #0d0f12 100%);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 24px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .title {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .title img {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+    }
+
+    .actions-top {
+      display: flex;
+      gap: 10px;
+    }
+
+    .shell {
+      flex: 1;
+      width: min(980px, 100%);
+      margin: 0 auto;
+      padding: 24px 24px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .hero {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      gap: 10px;
+      padding-top: 18px;
+    }
+
+    .hero-logo {
+      width: 84px;
+      height: 84px;
+      border-radius: 22px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 44px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .subtitle {
+      max-width: 720px;
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+
+    .conversation-shell {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 380px;
+      border-radius: 24px;
+      border: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(20, 25, 31, 0.94), rgba(14, 18, 23, 0.98));
+      overflow: hidden;
+      box-shadow: 0 22px 50px rgba(0, 0, 0, 0.24);
+    }
+
+    .messages {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      padding: 24px;
+      overflow-y: auto;
+    }
+
+    .message {
+      max-width: 760px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      border: 1px solid var(--border);
+      background: rgba(24, 31, 38, 0.95);
+    }
+
+    .message.user {
+      align-self: flex-end;
+      background: linear-gradient(180deg, rgba(78, 178, 255, 0.16), rgba(26, 47, 71, 0.94));
+      border-color: rgba(78, 178, 255, 0.35);
+    }
+
+    .message-role {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .message-body {
+      font-size: 15px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+    }
+
+    .quick-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      padding: 0 24px 18px;
+    }
+
+    .quick-chip {
+      border: 1px solid var(--border);
+      background: rgba(24, 31, 38, 0.95);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+    }
+
+    .quick-chip:hover, .mini-button:hover, .prompt-button:hover {
+      transform: translateY(-2px);
+      border-color: rgba(78, 178, 255, 0.75);
+      box-shadow: 0 14px 30px rgba(0, 0, 0, 0.22);
+    }
+
+    .composer {
+      margin-top: auto;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      padding: 18px 24px 24px;
+      background: rgba(13, 17, 22, 0.94);
+    }
+
+    .composer-box {
+      border-radius: 22px;
+      border: 1px solid rgba(78, 178, 255, 0.35);
+      background: linear-gradient(180deg, rgba(29, 34, 41, 0.96), rgba(18, 22, 27, 0.98));
+      box-shadow: 0 0 0 1px rgba(78, 178, 255, 0.08) inset;
+      padding: 16px;
+    }
+
+    .composer-input {
+      width: 100%;
+      min-height: 88px;
+      resize: vertical;
+      border: none;
+      outline: none;
+      background: transparent;
+      color: #d9e4f2;
+      font: inherit;
+      font-size: 16px;
+      line-height: 1.5;
+    }
+
+    .composer-input::placeholder {
+      color: #8698ae;
+    }
+
+    .composer-actions {
+      margin-top: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    .composer-hint {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .mini-button, .prompt-button {
+      border: 1px solid var(--border);
+      background: rgba(24, 31, 38, 0.95);
+      color: var(--text);
+      border-radius: 14px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+    }
+
+    .prompt-button.primary {
+      background: linear-gradient(180deg, var(--accent), var(--accent-2));
+      border-color: rgba(78, 178, 255, 0.95);
+      color: white;
+      font-weight: 600;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="title">
+      <img src="${logoUri}" alt="MAS" />
+      <span>MAS Control Panel</span>
+    </div>
+    <div class="actions-top">
+      <button class="mini-button" data-action="openSidebar">Open Sidebar</button>
+      <button class="mini-button" data-action="refreshSidebar">Refresh</button>
+    </div>
+  </div>
+
+  <div class="shell">
+    <div class="hero">
+      <img class="hero-logo" src="${logoUri}" alt="MAS" />
+      <h1>MAS</h1>
+      <p class="subtitle">Chat with MAS to install the runtime, start the API, run analysis, and inspect the latest task from a full editor panel.</p>
+    </div>
+
+    <div class="conversation-shell">
+      <div class="messages">${transcript}</div>
+      <div class="quick-actions">
+        <button class="quick-chip" data-action="installRuntime">Install Runtime</button>
+        <button class="quick-chip" data-action="startApi">Start API</button>
+        <button class="quick-chip" data-action="healthCheck">Health Check</button>
+        <button class="quick-chip" data-action="analyzeWorkspace">Analyze Workspace</button>
+        <button class="quick-chip" data-action="showLastTask">Show Last Task</button>
+      </div>
+      <div class="composer">
+        <div class="composer-box">
+          <textarea id="promptInput" class="composer-input" placeholder="Ask MAS to install runtime, start the API, run health check, analyze this workspace, or show the last task..."></textarea>
+          <div class="composer-actions">
+            <div class="composer-hint">Press Enter to send. Use Shift+Enter for a new line.</div>
+            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+              <button class="mini-button" data-action="openSidebar">Open Sidebar</button>
+              <button class="prompt-button primary" id="sendPrompt">Run MAS</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script nonce="${nonce}">
+    const vscode = acquireVsCodeApi();
+    document.querySelectorAll("[data-action]").forEach((element) => {
+      element.addEventListener("click", () => {
+        vscode.postMessage({ type: element.getAttribute("data-action") });
+      });
+    });
+    const promptInput = document.getElementById("promptInput");
+    const sendPrompt = document.getElementById("sendPrompt");
+    function submitPrompt() {
+      const text = promptInput.value.trim();
+      if (!text) {
+        return;
+      }
+      vscode.postMessage({ type: "prompt", text });
+      promptInput.value = "";
+    }
+    sendPrompt.addEventListener("click", submitPrompt);
+    promptInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        submitPrompt();
+      }
+    });
+  </script>
+</body>
+</html>`;
 }
 
 function requestJson<T>(method: string, path: string, body?: JsonObject): Promise<T> {
@@ -861,6 +1197,151 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
   }
 }
 
+class MasiPanel {
+  private static currentPanel: MasiPanel | undefined;
+  private readonly messages: PanelChatMessage[] = [
+    {
+      role: "assistant",
+      text: "You made it to the MAS control panel. Ask me to install the runtime, start the API, run a health check, analyze this workspace, or show the last task.",
+    },
+  ];
+
+  public static createOrShow(
+    context: vscode.ExtensionContext,
+    output: vscode.OutputChannel,
+    sidebar: MasiSidebarProvider,
+  ): void {
+    const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
+    if (MasiPanel.currentPanel) {
+      MasiPanel.currentPanel.panel.reveal(column);
+      MasiPanel.currentPanel.render();
+      return;
+    }
+
+    const panel = vscode.window.createWebviewPanel(
+      "masi.mainPanel",
+      "MAS",
+      column,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+      },
+    );
+
+    MasiPanel.currentPanel = new MasiPanel(panel, context, output, sidebar);
+  }
+
+  private constructor(
+    private readonly panel: vscode.WebviewPanel,
+    private readonly context: vscode.ExtensionContext,
+    private readonly output: vscode.OutputChannel,
+    private readonly sidebar: MasiSidebarProvider,
+  ) {
+    this.render();
+    this.panel.onDidDispose(() => {
+      MasiPanel.currentPanel = undefined;
+    });
+
+    this.panel.webview.onDidReceiveMessage(async (message: JsonObject) => {
+      const type = String(message.type ?? "");
+      if (type === "prompt") {
+        const text = String(message.text ?? "").trim();
+        if (text) {
+          await this.handlePrompt(text);
+        }
+      } else if (type) {
+        await this.handleAction(type);
+      }
+    });
+  }
+
+  private render(): void {
+    this.panel.webview.html = getPanelHtml(this.panel.webview, this.messages);
+  }
+
+  private appendMessage(role: PanelChatMessage["role"], text: string): void {
+    this.messages.push({ role, text });
+    this.render();
+  }
+
+  private async handleAction(action: string): Promise<void> {
+    const actionMap: Record<string, { command: string; reply: string }> = {
+      installRuntime: {
+        command: "masi.installRuntime",
+        reply: "Started the MAS runtime install flow. Check the MAS Install terminal if you want the live setup output.",
+      },
+      startApi: {
+        command: "masi.startApi",
+        reply: "Starting the MAS API now. Once it is up, run a health check or jump straight into analysis.",
+      },
+      healthCheck: {
+        command: "masi.healthCheck",
+        reply: "Running a MAS health check now.",
+      },
+      analyzeWorkspace: {
+        command: "masi.analyzeWorkspace",
+        reply: "Submitting the current workspace to MAS for analysis.",
+      },
+      showLastTask: {
+        command: "masi.showLastTask",
+        reply: "Opening the latest MAS task summary.",
+      },
+      refreshSidebar: {
+        command: "masi.refreshSidebar",
+        reply: "Refreshing the MAS sidebar.",
+      },
+      openSidebar: {
+        command: "workbench.view.extension.masi",
+        reply: "Opening the MAS sidebar.",
+      },
+    };
+
+    const item = actionMap[action];
+    if (!item) {
+      this.appendMessage("assistant", "I do not recognize that MAS action yet.");
+      return;
+    }
+
+    await vscode.commands.executeCommand(item.command);
+    this.appendMessage("assistant", item.reply);
+  }
+
+  private async handlePrompt(prompt: string): Promise<void> {
+    const normalized = prompt.toLowerCase();
+    this.appendMessage("user", prompt);
+
+    if (normalized.includes("install") || normalized.includes("setup") || normalized.includes("runtime")) {
+      await this.handleAction("installRuntime");
+      return;
+    }
+    if ((normalized.includes("start") || normalized.includes("launch")) && normalized.includes("api")) {
+      await this.handleAction("startApi");
+      return;
+    }
+    if (normalized.includes("health") || normalized.includes("status") || normalized.includes("ping")) {
+      await this.handleAction("healthCheck");
+      return;
+    }
+    if (normalized.includes("analyze") || normalized.includes("scan") || normalized.includes("inspect workspace")) {
+      await this.handleAction("analyzeWorkspace");
+      return;
+    }
+    if (normalized.includes("last task") || normalized.includes("latest task") || normalized.includes("show task")) {
+      await this.handleAction("showLastTask");
+      return;
+    }
+    if (normalized.includes("sidebar")) {
+      await this.handleAction("openSidebar");
+      return;
+    }
+
+    this.appendMessage(
+      "assistant",
+      "I can help with: install runtime, start API, run health check, analyze the current workspace, show the last task, or open the sidebar.",
+    );
+  }
+}
+
 async function runAnalyzeWorkspace(
   context: vscode.ExtensionContext,
   output: vscode.OutputChannel,
@@ -921,15 +1402,21 @@ export function activate(context: vscode.ExtensionContext) {
   const sidebar = new MasiSidebarProvider(context, output);
 
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-  statusItem.text = "$(hubot) MAS Analyze";
-  statusItem.command = "masi.analyzeWorkspace";
-  statusItem.tooltip = "Analyze the current workspace with MAS";
+  statusItem.text = "$(hubot) MAS";
+  statusItem.command = "masi.openPanel";
+  statusItem.tooltip = "Open the MAS control panel";
   statusItem.show();
 
   context.subscriptions.push(
     output,
     statusItem,
     vscode.window.registerWebviewViewProvider(MasiSidebarProvider.viewType, sidebar),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("masi.openPanel", async () => {
+      MasiPanel.createOrShow(context, output, sidebar);
+    }),
   );
 
   context.subscriptions.push(

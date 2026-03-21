@@ -14,6 +14,7 @@ MAS adds a dedicated activity bar view for your multi-agent system so users can:
 ## Commands
 
 - `MAS: Install Runtime`
+- `MAS: Open Panel`
 - `MAS: Start API`
 - `MAS: Health Check`
 - `MAS: Analyze Current Workspace`
@@ -27,6 +28,8 @@ Open the `MAS` activity bar icon to access the control panel sidebar. It shows:
 - API health
 - one-click runtime actions
 - recent MAS tasks with clickable summaries
+
+Open `MAS: Open Panel` to launch the full editor-style MAS workspace with a chat-like prompt, quick actions, and natural command routing.
 
 ## Expected workflow
 
@@ -44,4 +47,4 @@ Open the `MAS` activity bar icon to access the control panel sidebar. It shows:
 
 ## Publish Notes
 
-Before publishing to the VS Code Marketplace, replace the temporary local publisher in `package.json` with your real publisher ID and add your real public repository, homepage, and bug tracker URLs. See `PUBLISHING.md` for the exact steps.
+The Marketplace package now points to the public MAS source repository and issue tracker. Use `PUBLISHING.md` if you need to publish a new version or rotate publisher credentials later.
