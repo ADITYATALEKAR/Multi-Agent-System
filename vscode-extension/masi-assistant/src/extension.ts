@@ -38,29 +38,72 @@ interface TaskItem {
 }
 
 interface RuntimeStatus {
+  repoRoot: string;
+  pythonPath: string;
   repoRootExists: boolean;
   pythonExists: boolean;
+  autoDetectedRepoRoot: boolean;
 }
 
 interface PanelChatMessage {
   role: "assistant" | "user";
   text: string;
+  taskId?: string;
+  cards?: ChatCard[];
+  followUpActions?: FollowUpAction[];
+}
+
+interface BackendChatResponse {
+  answer: string;
+  intent: "answer" | "action";
+  recommended_action?: string;
+  source_task_id?: string;
+  highlights?: string[];
+  cards?: ChatCard[];
+  follow_up_actions?: FollowUpAction[];
+}
+
+interface ChatCard {
+  title: string;
+  body: string;
+  action?: string | null;
+  action_label?: string | null;
+}
+
+interface FollowUpAction {
+  action: string;
+  label: string;
 }
 
 function getConfig() {
   const config = vscode.workspace.getConfiguration("masi");
+  const configuredRepoRoot = config.get<string>("repoRoot", "");
+  const detectedRepoRoot = (!configuredRepoRoot || !fs.existsSync(configuredRepoRoot))
+    ? detectWorkspaceRepoRoot()
+    : undefined;
+  const repoRoot = configuredRepoRoot && fs.existsSync(configuredRepoRoot)
+    ? configuredRepoRoot
+    : detectedRepoRoot ?? configuredRepoRoot;
+  const configuredPythonPath = config.get<string>("pythonPath", "");
+  const pythonPath = configuredPythonPath && fs.existsSync(configuredPythonPath)
+    ? configuredPythonPath
+    : repoRoot ? getDefaultPythonPath(repoRoot) : configuredPythonPath;
   return {
     apiBaseUrl: config.get<string>("apiBaseUrl", "http://127.0.0.1:8000"),
-    repoRoot: config.get<string>("repoRoot", ""),
-    pythonPath: config.get<string>("pythonPath", ""),
+    repoRoot,
+    pythonPath,
+    autoDetectedRepoRoot: Boolean(detectedRepoRoot && detectedRepoRoot === repoRoot),
   };
 }
 
 function getRuntimeStatus(): RuntimeStatus {
-  const { repoRoot, pythonPath } = getConfig();
+  const { repoRoot, pythonPath, autoDetectedRepoRoot } = getConfig();
   return {
+    repoRoot,
+    pythonPath,
     repoRootExists: fs.existsSync(repoRoot),
     pythonExists: fs.existsSync(pythonPath),
+    autoDetectedRepoRoot,
   };
 }
 
@@ -75,11 +118,40 @@ function quoteForPowerShell(value: string): string {
   return `"${value.replace(/"/g, '`"')}"`;
 }
 
-async function ensureRepoRootConfigured(): Promise<string | undefined> {
+function isMasRepoRoot(candidate: string): boolean {
+  return fs.existsSync(path.join(candidate, "pyproject.toml"))
+    && fs.existsSync(path.join(candidate, "src", "api", "app.py"));
+}
+
+function detectWorkspaceRepoRoot(): string | undefined {
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    if (isMasRepoRoot(folder.uri.fsPath)) {
+      return folder.uri.fsPath;
+    }
+  }
+  return undefined;
+}
+
+async function persistRepoConfiguration(repoRoot: string): Promise<void> {
   const config = vscode.workspace.getConfiguration("masi");
-  const configuredRepoRoot = config.get<string>("repoRoot", "");
-  if (configuredRepoRoot && fs.existsSync(configuredRepoRoot)) {
-    return configuredRepoRoot;
+  const nextPythonPath = getDefaultPythonPath(repoRoot);
+  await config.update("repoRoot", repoRoot, vscode.ConfigurationTarget.Global);
+  await config.update("pythonPath", nextPythonPath, vscode.ConfigurationTarget.Global);
+}
+
+async function ensureRepoRootConfigured(): Promise<string | undefined> {
+  const { repoRoot, autoDetectedRepoRoot } = getConfig();
+  if (repoRoot && fs.existsSync(repoRoot)) {
+    if (autoDetectedRepoRoot) {
+      await persistRepoConfiguration(repoRoot);
+    }
+    return repoRoot;
+  }
+
+  const detectedRepoRoot = detectWorkspaceRepoRoot();
+  if (detectedRepoRoot) {
+    await persistRepoConfiguration(detectedRepoRoot);
+    return detectedRepoRoot;
   }
 
   const selectedFolder = await vscode.window.showOpenDialog({
@@ -90,15 +162,14 @@ async function ensureRepoRootConfigured(): Promise<string | undefined> {
     openLabel: "Select MAS Repository",
     title: "Select the MAS repository root",
   });
-  const repoRoot = selectedFolder?.[0]?.fsPath;
-  if (!repoRoot) {
+  const selectedRepoRoot = selectedFolder?.[0]?.fsPath;
+  if (!selectedRepoRoot) {
     void vscode.window.showErrorMessage("MAS needs a repository folder before it can install or start.");
     return undefined;
   }
 
-  await config.update("repoRoot", repoRoot, vscode.ConfigurationTarget.Global);
-  await config.update("pythonPath", getDefaultPythonPath(repoRoot), vscode.ConfigurationTarget.Global);
-  return repoRoot;
+  await persistRepoConfiguration(selectedRepoRoot);
+  return selectedRepoRoot;
 }
 
 function buildInstallCommands(repoRoot: string, pythonPath: string): string[] {
@@ -134,328 +205,440 @@ function createOutputChannel(): vscode.OutputChannel {
   return vscode.window.createOutputChannel("MAS");
 }
 
-function getPanelHtml(webview: vscode.Webview, messages: PanelChatMessage[]): string {
-  const nonce = String(Date.now());
-  const logoUri = webview.asWebviewUri(
-    vscode.Uri.joinPath(vscode.Uri.file(__dirname), "..", "media", "mas-icon.png"),
-  );
-  const transcript = messages.map((message) => `
+class ChatHistoryStore {
+  private readonly listeners = new Set<() => void>();
+
+  public constructor(private readonly context: vscode.ExtensionContext) {}
+
+  public load(taskId?: string): PanelChatMessage[] {
+    return this.context.workspaceState.get<PanelChatMessage[]>(this.getThreadKey(taskId), []);
+  }
+
+  public async save(messages: PanelChatMessage[], taskId?: string): Promise<void> {
+    await this.context.workspaceState.update(this.getThreadKey(taskId), messages);
+    this.emit();
+  }
+
+  public getActiveTaskId(): string | undefined {
+    return this.context.workspaceState.get<string>(this.getActiveTaskKey());
+  }
+
+  public async setActiveTaskId(taskId?: string): Promise<void> {
+    await this.context.workspaceState.update(this.getActiveTaskKey(), taskId);
+    this.emit();
+  }
+
+  public subscribe(listener: () => void): vscode.Disposable {
+    this.listeners.add(listener);
+    return new vscode.Disposable(() => {
+      this.listeners.delete(listener);
+    });
+  }
+
+  private emit(): void {
+    for (const listener of this.listeners) {
+      listener();
+    }
+  }
+
+  private getActiveTaskKey(): string {
+    const workspaceKey = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "global";
+    return `masi.chatActiveTask::${workspaceKey}`;
+  }
+
+  private getThreadKey(taskId?: string): string {
+    const workspaceKey = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "global";
+    return `masi.chatHistory::${workspaceKey}::${taskId ?? "general"}`;
+  }
+}
+
+function getDefaultChatMessages(): PanelChatMessage[] {
+  return [
+    {
+      role: "assistant",
+      text: "MAS is ready. Ask about status, summaries, repairs, hypotheses, or tell it what to do.",
+      followUpActions: [
+        { action: "healthCheck", label: "health" },
+        { action: "showLastTask", label: "last task" },
+        { action: "analyzeWorkspace", label: "analyze" },
+      ],
+    },
+  ];
+}
+
+type MasiAction =
+  | "installRuntime"
+  | "startApi"
+  | "healthCheck"
+  | "analyzeWorkspace"
+  | "showLastTask"
+  | "refreshSidebar"
+  | "openSidebar";
+
+const MAS_ACTIONS: Record<MasiAction, { command: string; reply: string }> = {
+  installRuntime: {
+    command: "masi.installRuntime",
+    reply: "Started the MAS runtime install flow. Check the MAS Install terminal if you want the live setup output.",
+  },
+  startApi: {
+    command: "masi.startApi",
+    reply: "Starting the MAS API now. Once it is up, run a health check or jump straight into analysis.",
+  },
+  healthCheck: {
+    command: "masi.healthCheck",
+    reply: "Running a MAS health check now.",
+  },
+  analyzeWorkspace: {
+    command: "masi.analyzeWorkspace",
+    reply: "Submitting the current workspace to MAS for analysis.",
+  },
+  showLastTask: {
+    command: "masi.showLastTask",
+    reply: "Opening the latest MAS task summary.",
+  },
+  refreshSidebar: {
+    command: "masi.refreshSidebar",
+    reply: "Refreshing the MAS sidebar.",
+  },
+  openSidebar: {
+    command: "workbench.view.extension.masi",
+    reply: "Opening the MAS sidebar.",
+  },
+};
+
+function resolvePromptAction(prompt: string): MasiAction | undefined {
+  const normalized = prompt.toLowerCase();
+  if (normalized.includes("install") || normalized.includes("setup") || normalized.includes("runtime")) {
+    return "installRuntime";
+  }
+  if ((normalized.includes("start") || normalized.includes("launch")) && normalized.includes("api")) {
+    return "startApi";
+  }
+  if (normalized.includes("health") || normalized.includes("status") || normalized.includes("ping")) {
+    return "healthCheck";
+  }
+  if (normalized.includes("analyze") || normalized.includes("scan") || normalized.includes("inspect workspace")) {
+    return "analyzeWorkspace";
+  }
+  if (normalized.includes("last task") || normalized.includes("latest task") || normalized.includes("show task")) {
+    return "showLastTask";
+  }
+  if (normalized.includes("sidebar")) {
+    return "openSidebar";
+  }
+  return undefined;
+}
+
+function isConnectionRefusedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("ECONNREFUSED") || message.includes("socket hang up");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+interface ChatRenderState {
+  title: string;
+  messages: PanelChatMessage[];
+  runtimeStatus: RuntimeStatus;
+  healthStatus: string;
+  selectedTask?: TaskItem;
+}
+
+function renderMessageCards(message: PanelChatMessage): string {
+  const cards = message.cards ?? [];
+  const followUpActions = message.followUpActions ?? [];
+  const cardMarkup = cards.length > 0
+    ? `<div class="card-list">${cards.map((card) => `
+        <div class="info-card">
+          <div class="card-title">${escapeHtml(card.title)}</div>
+          <div class="card-body">${escapeHtml(card.body)}</div>
+          ${card.action ? `<button class="chip" data-action="${escapeHtml(card.action)}">${escapeHtml(card.action_label ?? 'open')}</button>` : ''}
+        </div>
+      `).join("")}</div>`
+    : "";
+  const followUpsMarkup = followUpActions.length > 0
+    ? `<div class="follow-ups"><span class="meta-label">options:</span>${followUpActions.map((item) => `
+        <button class="chip" data-action="${escapeHtml(item.action)}">${escapeHtml(item.label)}</button>
+      `).join("")}</div>`
+    : "";
+  return cardMarkup + followUpsMarkup;
+}
+
+function renderMessages(messages: PanelChatMessage[]): string {
+  return messages.map((message) => `
     <div class="message ${message.role}">
-      <div class="message-role">${message.role === "assistant" ? "MAS" : "You"}</div>
+      <div class="message-role">${message.role === 'assistant' ? 'MAS:' : 'You:'}</div>
       <div class="message-body">${escapeHtml(message.text)}</div>
+      ${renderMessageCards(message)}
     </div>
   `).join("");
+}
+
+function renderTaskSummary(task: TaskItem | undefined): string {
+  if (!task) {
+    return 'task: none';
+  }
+  const result = task.result ?? {};
+  return [
+    `task: ${escapeHtml(task.task_id)}`,
+    `status ${escapeHtml(task.status)}`,
+    `violations ${escapeHtml(String(result.violations_found ?? task.violations.length))}`,
+    `repairs ${escapeHtml(String(result.repairs_proposed ?? task.repairs.length))}`,
+  ].join(' | ');
+}
+
+function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string {
+  const nonce = String(Date.now());
+  const setupParts = [
+    `repo ${state.runtimeStatus.repoRootExists ? 'ready' : 'unset'}`,
+    `runtime ${state.runtimeStatus.pythonExists ? 'ready' : 'missing'}`,
+    `api ${state.healthStatus}`,
+  ].join(' | ');
+  const menuButtons = [
+    ['installRuntime', 'setup'],
+    ['startApi', 'start api'],
+    ['healthCheck', 'health'],
+    ['analyzeWorkspace', 'analyze'],
+    ['showLastTask', 'last task'],
+  ].map(([action, label]) => `
+      <button class="chip" data-action="${action}">${label}</button>
+    `).join('');
+  const transcript = renderMessages(state.messages);
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} https: data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MAS</title>
+  <title>${escapeHtml(state.title)}</title>
   <style>
     :root {
-      --bg: #111315;
-      --bg-2: #171b20;
-      --panel: rgba(26, 32, 39, 0.88);
-      --panel-2: rgba(18, 23, 29, 0.92);
-      --text: #f3f7fc;
-      --muted: #9fb0c5;
-      --accent: #4eb2ff;
-      --accent-2: #0d8bff;
-      --border: rgba(98, 128, 164, 0.22);
+      --bg: #000000;
+      --panel: #050505;
+      --panel-2: #0a0a0a;
+      --border: #242424;
+      --text: #ffffff;
+      --muted: #bfbfbf;
+      --soft: #8c8c8c;
     }
-
     * { box-sizing: border-box; }
-
     body {
       margin: 0;
       min-height: 100vh;
-      font-family: "Segoe UI", sans-serif;
+      background: var(--bg);
       color: var(--text);
-      background:
-        radial-gradient(circle at top center, rgba(78, 178, 255, 0.14), transparent 24%),
-        radial-gradient(circle at bottom center, rgba(13, 139, 255, 0.09), transparent 20%),
-        linear-gradient(180deg, var(--bg) 0%, #0d0f12 100%);
+      font-family: "Segoe UI", sans-serif;
       display: flex;
       flex-direction: column;
     }
-
-    .topbar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 18px 24px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    }
-
-    .title {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      font-size: 15px;
-      font-weight: 600;
-    }
-
-    .title img {
-      width: 28px;
-      height: 28px;
-      border-radius: 8px;
-    }
-
-    .actions-top {
-      display: flex;
-      gap: 10px;
-    }
-
     .shell {
-      flex: 1;
-      width: min(980px, 100%);
-      margin: 0 auto;
-      padding: 24px 24px 20px;
       display: flex;
       flex-direction: column;
-      gap: 18px;
+      min-height: 100vh;
+      background: var(--bg);
     }
-
-    .hero {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      text-align: center;
-      gap: 10px;
-      padding-top: 18px;
+    .header {
+      padding: 18px 18px 12px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
     }
-
-    .hero-logo {
-      width: 84px;
-      height: 84px;
-      border-radius: 22px;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-    }
-
-    h1 {
-      margin: 0;
-      font-size: 44px;
+    .title {
+      font-size: 14px;
       font-weight: 700;
-      letter-spacing: 0.02em;
-    }
-
-    .subtitle {
-      max-width: 720px;
-      margin: 0;
-      font-size: 18px;
-      line-height: 1.6;
-      color: var(--muted);
-    }
-
-    .conversation-shell {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      min-height: 380px;
-      border-radius: 24px;
-      border: 1px solid var(--border);
-      background: linear-gradient(180deg, rgba(20, 25, 31, 0.94), rgba(14, 18, 23, 0.98));
-      overflow: hidden;
-      box-shadow: 0 22px 50px rgba(0, 0, 0, 0.24);
-    }
-
-    .messages {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-      padding: 24px;
-      overflow-y: auto;
-    }
-
-    .message {
-      max-width: 760px;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      padding: 14px 16px;
-      border-radius: 18px;
-      border: 1px solid var(--border);
-      background: rgba(24, 31, 38, 0.95);
-    }
-
-    .message.user {
-      align-self: flex-end;
-      background: linear-gradient(180deg, rgba(78, 178, 255, 0.16), rgba(26, 47, 71, 0.94));
-      border-color: rgba(78, 178, 255, 0.35);
-    }
-
-    .message-role {
-      font-size: 11px;
       letter-spacing: 0.08em;
       text-transform: uppercase;
-      color: var(--muted);
     }
-
-    .message-body {
-      font-size: 15px;
-      line-height: 1.6;
-      white-space: pre-wrap;
-    }
-
-    .quick-actions {
+    .meta-stack {
       display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      padding: 0 24px 18px;
+      flex-direction: column;
+      gap: 8px;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
     }
-
-    .quick-chip {
-      border: 1px solid var(--border);
-      background: rgba(24, 31, 38, 0.95);
-      color: var(--text);
-      border-radius: 999px;
-      padding: 10px 14px;
-      cursor: pointer;
-      font-size: 13px;
-      transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
-    }
-
-    .quick-chip:hover, .mini-button:hover, .prompt-button:hover {
-      transform: translateY(-2px);
-      border-color: rgba(78, 178, 255, 0.75);
-      box-shadow: 0 14px 30px rgba(0, 0, 0, 0.22);
-    }
-
-    .composer {
-      margin-top: auto;
-      border-top: 1px solid rgba(255, 255, 255, 0.06);
-      padding: 18px 24px 24px;
-      background: rgba(13, 17, 22, 0.94);
-    }
-
-    .composer-box {
-      border-radius: 22px;
-      border: 1px solid rgba(78, 178, 255, 0.35);
-      background: linear-gradient(180deg, rgba(29, 34, 41, 0.96), rgba(18, 22, 27, 0.98));
-      box-shadow: 0 0 0 1px rgba(78, 178, 255, 0.08) inset;
-      padding: 16px;
-    }
-
-    .composer-input {
-      width: 100%;
-      min-height: 88px;
-      resize: vertical;
-      border: none;
-      outline: none;
-      background: transparent;
-      color: #d9e4f2;
-      font: inherit;
-      font-size: 16px;
+    .meta-line {
+      color: var(--muted);
+      font-size: 12px;
       line-height: 1.5;
     }
-
-    .composer-input::placeholder {
-      color: #8698ae;
+    .meta-label {
+      color: var(--text);
+      font-weight: 700;
+      margin-right: 6px;
     }
-
-    .composer-actions {
-      margin-top: 12px;
+    .menu-row, .follow-ups {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .chat {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .message {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      padding: 14px;
+      border-radius: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .message.user {
+      background: var(--panel-2);
+    }
+    .message-role {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--soft);
+    }
+    .message-body {
+      font-size: 14px;
+      line-height: 1.65;
+      white-space: pre-wrap;
+    }
+    .card-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .info-card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      background: #020202;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .card-title {
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: lowercase;
+    }
+    .card-body {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+    .chip {
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text);
+      border-radius: 999px;
+      padding: 7px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .chip:hover {
+      border-color: #ffffff;
+    }
+    .composer {
+      border-top: 1px solid var(--border);
+      padding: 14px 18px 18px;
+      background: var(--bg);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .composer textarea {
+      width: 100%;
+      min-height: 72px;
+      resize: vertical;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: #050505;
+      color: var(--text);
+      padding: 12px;
+      font: inherit;
+      line-height: 1.5;
+      outline: none;
+    }
+    .composer textarea::placeholder {
+      color: var(--soft);
+    }
+    .composer-bottom {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 14px;
+      gap: 12px;
       flex-wrap: wrap;
     }
-
-    .composer-hint {
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .mini-button, .prompt-button {
-      border: 1px solid var(--border);
-      background: rgba(24, 31, 38, 0.95);
-      color: var(--text);
-      border-radius: 14px;
-      padding: 10px 14px;
-      cursor: pointer;
-      font-size: 13px;
-      transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
-    }
-
-    .prompt-button.primary {
-      background: linear-gradient(180deg, var(--accent), var(--accent-2));
-      border-color: rgba(78, 178, 255, 0.95);
-      color: white;
-      font-weight: 600;
-    }
-
     .hint {
-      color: var(--muted);
-      font-size: 13px;
+      color: var(--soft);
+      font-size: 12px;
+    }
+    .send {
+      border: 1px solid #ffffff;
+      background: #111111;
+      color: #ffffff;
+      border-radius: 12px;
+      padding: 9px 14px;
+      cursor: pointer;
+      font-weight: 700;
     }
   </style>
 </head>
 <body>
-  <div class="topbar">
-    <div class="title">
-      <img src="${logoUri}" alt="MAS" />
-      <span>MAS Control Panel</span>
-    </div>
-    <div class="actions-top">
-      <button class="mini-button" data-action="openSidebar">Open Sidebar</button>
-      <button class="mini-button" data-action="refreshSidebar">Refresh</button>
-    </div>
-  </div>
-
   <div class="shell">
-    <div class="hero">
-      <img class="hero-logo" src="${logoUri}" alt="MAS" />
-      <h1>MAS</h1>
-      <p class="subtitle">Chat with MAS to install the runtime, start the API, run analysis, and inspect the latest task from a full editor panel.</p>
+    <div class="header">
+      <div class="title">${escapeHtml(state.title)}</div>
     </div>
-
-    <div class="conversation-shell">
+    <div class="meta-stack">
+      <div class="meta-line"><span class="meta-label">setup:</span>${escapeHtml(setupParts)}</div>
+      <div class="meta-line"><span class="meta-label">menu:</span></div>
+      <div class="menu-row">${menuButtons}</div>
+      <div class="meta-line">${renderTaskSummary(state.selectedTask)}</div>
+    </div>
+    <div class="chat">
       <div class="messages">${transcript}</div>
-      <div class="quick-actions">
-        <button class="quick-chip" data-action="installRuntime">Install Runtime</button>
-        <button class="quick-chip" data-action="startApi">Start API</button>
-        <button class="quick-chip" data-action="healthCheck">Health Check</button>
-        <button class="quick-chip" data-action="analyzeWorkspace">Analyze Workspace</button>
-        <button class="quick-chip" data-action="showLastTask">Show Last Task</button>
-      </div>
       <div class="composer">
-        <div class="composer-box">
-          <textarea id="promptInput" class="composer-input" placeholder="Ask MAS to install runtime, start the API, run health check, analyze this workspace, or show the last task..."></textarea>
-          <div class="composer-actions">
-            <div class="composer-hint">Press Enter to send. Use Shift+Enter for a new line.</div>
-            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-              <button class="mini-button" data-action="openSidebar">Open Sidebar</button>
-              <button class="prompt-button primary" id="sendPrompt">Run MAS</button>
-            </div>
-          </div>
+        <textarea id="promptInput" placeholder="Ask MAS about status, summary, repairs, hypotheses, or tell it what to do."></textarea>
+        <div class="composer-bottom">
+          <div class="hint">enter: send | shift+enter: new line</div>
+          <button class="send" id="sendPrompt">send</button>
         </div>
       </div>
     </div>
   </div>
-
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-    document.querySelectorAll("[data-action]").forEach((element) => {
-      element.addEventListener("click", () => {
-        vscode.postMessage({ type: element.getAttribute("data-action") });
+    document.querySelectorAll('[data-action]').forEach((element) => {
+      element.addEventListener('click', () => {
+        vscode.postMessage({ type: element.getAttribute('data-action') });
       });
     });
-    const promptInput = document.getElementById("promptInput");
-    const sendPrompt = document.getElementById("sendPrompt");
-    function submitPrompt() {
+    const promptInput = document.getElementById('promptInput');
+    const sendPrompt = document.getElementById('sendPrompt');
+    const submitPrompt = () => {
       const text = promptInput.value.trim();
       if (!text) {
         return;
       }
-      vscode.postMessage({ type: "prompt", text });
-      promptInput.value = "";
-    }
-    sendPrompt.addEventListener("click", submitPrompt);
-    promptInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && !event.shiftKey) {
+      vscode.postMessage({ type: 'prompt', text });
+      promptInput.value = '';
+    };
+    sendPrompt.addEventListener('click', submitPrompt);
+    promptInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
         submitPrompt();
       }
@@ -463,6 +646,22 @@ function getPanelHtml(webview: vscode.Webview, messages: PanelChatMessage[]): st
   </script>
 </body>
 </html>`;
+}
+
+function getPanelHtml(
+  webview: vscode.Webview,
+  messages: PanelChatMessage[],
+  runtimeStatus: RuntimeStatus,
+  healthStatus: string,
+  selectedTask?: TaskItem,
+): string {
+  return renderChatHtml(webview, {
+    title: 'MAS',
+    messages,
+    runtimeStatus,
+    healthStatus,
+    selectedTask,
+  });
 }
 
 function requestJson<T>(method: string, path: string, body?: JsonObject): Promise<T> {
@@ -501,6 +700,97 @@ function requestJson<T>(method: string, path: string, body?: JsonObject): Promis
     }
     request.end();
   });
+}
+
+let apiStartupPromise: Promise<boolean> | undefined;
+
+async function waitForApiReady(timeoutMs = 20000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await requestJson<JsonObject>("GET", "/health");
+      return true;
+    } catch (error) {
+      if (!isConnectionRefusedError(error)) {
+        throw error;
+      }
+      await sleep(1000);
+    }
+  }
+  return false;
+}
+
+async function startApiProcess(
+  output: vscode.OutputChannel,
+  sidebar: MasiSidebarProvider,
+  options: { revealTerminal: boolean; reason: string },
+): Promise<boolean> {
+  if (apiStartupPromise) {
+    return apiStartupPromise;
+  }
+
+  apiStartupPromise = (async () => {
+    const repoRoot = await ensureRepoRootConfigured();
+    if (!repoRoot) {
+      return false;
+    }
+
+    const { pythonPath } = getConfig();
+    if (!pythonPath || !fs.existsSync(pythonPath)) {
+      output.appendLine(`MAS API start skipped: Python runtime not found at ${pythonPath || "(unset)"}.`);
+      if (options.revealTerminal) {
+        void vscode.window.showWarningMessage("MAS runtime is not installed yet. Run 'MAS: Install Runtime' first.");
+      }
+      await sidebar.refresh();
+      return false;
+    }
+
+    const terminal = vscode.window.createTerminal({
+      name: "MAS API",
+      cwd: repoRoot,
+    });
+    if (options.revealTerminal) {
+      terminal.show(true);
+    }
+    terminal.sendText(`"${pythonPath}" -m uvicorn src.api.app:create_app --factory --host 127.0.0.1 --port 8000`, true);
+    output.appendLine(`Starting MAS API in ${repoRoot} (${options.reason}).`);
+
+    const ready = await waitForApiReady();
+    output.appendLine(
+      ready
+        ? "MAS API is healthy on http://127.0.0.1:8000."
+        : "MAS API is still starting or failed to come up. Check the MAS API terminal for details.",
+    );
+    await sidebar.refresh();
+    return ready;
+  })();
+
+  try {
+    return await apiStartupPromise;
+  } finally {
+    apiStartupPromise = undefined;
+  }
+}
+
+async function ensureApiAvailable(
+  output: vscode.OutputChannel,
+  sidebar: MasiSidebarProvider,
+  options: { revealTerminal: boolean; reason: string },
+): Promise<boolean> {
+  try {
+    await requestJson<JsonObject>("GET", "/health");
+    return true;
+  } catch (error) {
+    if (!isConnectionRefusedError(error)) {
+      throw error;
+    }
+
+    const runtimeStatus = getRuntimeStatus();
+    if (!runtimeStatus.pythonExists) {
+      return false;
+    }
+    return startApiProcess(output, sidebar, options);
+  }
 }
 
 function escapeHtml(value: string): string {
@@ -546,17 +836,68 @@ function renderTaskDocument(task: TaskItem): string {
   return lines.join("\n");
 }
 
+async function requestBackendChatReply(
+  prompt: string,
+  context: vscode.ExtensionContext,
+  output: vscode.OutputChannel,
+  sidebar: MasiSidebarProvider,
+): Promise<BackendChatResponse | undefined> {
+  const runtimeStatus = getRuntimeStatus();
+  const fallbackAction = resolvePromptAction(prompt);
+  const apiReady = await ensureApiAvailable(output, sidebar, {
+    revealTerminal: false,
+    reason: "backend chat query",
+  });
+  if (!apiReady) {
+    if (fallbackAction) {
+      return {
+        answer: runtimeStatus.pythonExists
+          ? "The backend chat is not reachable yet, but I can still run that local MAS action for you."
+          : "The MAS runtime is not installed yet, so I can fall back to the local setup flow.",
+        intent: "action",
+        recommended_action: fallbackAction,
+        follow_up_actions: [
+          { action: fallbackAction, label: fallbackAction === "installRuntime" ? "setup" : "run" },
+        ],
+      };
+    }
+    return {
+      answer: runtimeStatus.pythonExists
+        ? "I tried to bring the MAS API online, but it is still starting or failed to start. Check the MAS API terminal for the real traceback."
+        : "The MAS API is offline because the runtime is not installed yet. Ask me to install the runtime first.",
+      intent: "answer",
+    };
+  }
+
+  return requestJson<BackendChatResponse>("POST", "/api/v1/chat", {
+    prompt,
+    tenant_id: "default",
+    task_id: context.globalState.get<string>("masi.lastTaskId") ?? "",
+    repo_path: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "",
+  });
+}
+
 class MasiSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "masi.sidebar";
 
   private view?: vscode.WebviewView;
   private selectedTaskId?: string;
   private pollHandle?: NodeJS.Timeout;
+  private messages: PanelChatMessage[];
+  private lastOfflineNotice?: string;
+  private readonly historySubscription: vscode.Disposable;
 
   public constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly output: vscode.OutputChannel,
-  ) {}
+    private readonly history: ChatHistoryStore,
+  ) {
+    this.selectedTaskId = this.history.getActiveTaskId() ?? this.context.globalState.get<string>("masi.lastTaskId");
+    this.messages = this.loadMessages(this.selectedTaskId);
+    this.historySubscription = this.history.subscribe(() => {
+      void this.syncFromHistory();
+    });
+  }
 
   public resolveWebviewView(webviewView: vscode.WebviewView): void | Thenable<void> {
     this.view = webviewView;
@@ -566,21 +907,24 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.onDidReceiveMessage(async (message: JsonObject) => {
       const type = String(message.type ?? "");
-      if (type === "installRuntime") {
-        await vscode.commands.executeCommand("masi.installRuntime");
-      } else if (type === "startApi") {
-        await vscode.commands.executeCommand("masi.startApi");
-      } else if (type === "healthCheck") {
-        await vscode.commands.executeCommand("masi.healthCheck");
-      } else if (type === "analyzeWorkspace") {
-        await vscode.commands.executeCommand("masi.analyzeWorkspace");
+      if (type === "prompt") {
+        const text = String(message.text ?? "").trim();
+        if (text) {
+          await this.handlePrompt(text);
+        }
+      } else if (type in MAS_ACTIONS) {
+        const action = type as MasiAction;
+        if (action === "installRuntime" || action === "startApi" || action === "healthCheck" || action === "analyzeWorkspace") {
+          await this.runAction(action);
+        } else {
+          await vscode.commands.executeCommand(MAS_ACTIONS[action].command);
+        }
       } else if (type === "refresh") {
         await this.refresh();
       } else if (type === "selectTask") {
         const taskId = String(message.taskId ?? "");
         if (taskId) {
-          this.selectedTaskId = taskId;
-          await this.context.globalState.update("masi.lastTaskId", taskId);
+          await this.setActiveTask(taskId);
           await this.refresh();
         }
       } else if (type === "openTaskDocument") {
@@ -619,6 +963,9 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    this.selectedTaskId = this.history.getActiveTaskId() ?? this.selectedTaskId;
+    this.messages = this.loadMessages(this.selectedTaskId);
+
     let healthStatus = "unknown";
     let tasks: TaskItem[] = [];
     let selectedTask: TaskItem | undefined;
@@ -627,26 +974,46 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
     try {
       const health = await requestJson<JsonObject>("GET", "/health");
       healthStatus = String(health.status ?? "unknown");
+      this.lastOfflineNotice = undefined;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.output.appendLine(`Sidebar health check failed: ${message}`);
-      healthStatus = "offline";
+      if (isConnectionRefusedError(error)) {
+        healthStatus = runtimeStatus.pythonExists ? "starting" : "offline";
+        const offlineNotice = runtimeStatus.pythonExists
+          ? `MAS API is offline at ${getConfig().apiBaseUrl}. Starting it automatically.`
+          : "MAS API is offline and the MAS runtime is not installed yet.";
+        if (this.lastOfflineNotice !== offlineNotice) {
+          this.output.appendLine(offlineNotice);
+          this.lastOfflineNotice = offlineNotice;
+        }
+        if (runtimeStatus.pythonExists) {
+          void startApiProcess(this.output, this, {
+            revealTerminal: false,
+            reason: "sidebar auto-start",
+          });
+        }
+      } else {
+        this.output.appendLine(`Sidebar health check failed: ${message}`);
+        healthStatus = "offline";
+      }
     }
 
-    try {
-      tasks = await requestJson<TaskItem[]>("GET", "/api/v1/tasks?limit=8");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.output.appendLine(`Sidebar task refresh failed: ${message}`);
+    if (healthStatus === "healthy") {
+      try {
+        tasks = await requestJson<TaskItem[]>("GET", "/api/v1/tasks?limit=8");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.output.appendLine(`Sidebar task refresh failed: ${message}`);
+      }
     }
 
     if (!this.selectedTaskId) {
-      this.selectedTaskId = this.context.globalState.get<string>("masi.lastTaskId");
+      this.selectedTaskId = this.history.getActiveTaskId() ?? this.context.globalState.get<string>("masi.lastTaskId");
     }
     if (!this.selectedTaskId && tasks.length > 0) {
-      this.selectedTaskId = tasks[0].task_id;
+      await this.setActiveTask(tasks[0].task_id);
     }
-    if (this.selectedTaskId) {
+    if (healthStatus === "healthy" && this.selectedTaskId) {
       try {
         selectedTask = await requestJson<TaskItem>("GET", `/api/v1/tasks/${this.selectedTaskId}`);
       } catch (error) {
@@ -667,8 +1034,7 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
         language: "markdown",
       });
       await vscode.window.showTextDocument(document, { preview: false });
-      this.selectedTaskId = taskId;
-      await this.context.globalState.update("masi.lastTaskId", taskId);
+      await this.setActiveTask(taskId);
       await this.refresh();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -727,489 +1093,123 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
     }, 15000);
   }
 
+  private loadMessages(taskId?: string): PanelChatMessage[] {
+    const stored = this.history.load(taskId);
+    return stored.length > 0 ? stored : getDefaultChatMessages();
+  }
+
+  private async setActiveTask(taskId?: string): Promise<void> {
+    this.selectedTaskId = taskId;
+    this.messages = this.loadMessages(taskId);
+    await this.context.globalState.update("masi.lastTaskId", taskId);
+    await this.history.setActiveTaskId(taskId);
+  }
+
+  private async persistMessages(): Promise<void> {
+    await this.history.save(this.messages, this.selectedTaskId);
+  }
+
+  private async appendMessage(
+    role: PanelChatMessage["role"],
+    text: string,
+    extra: Partial<Omit<PanelChatMessage, "role" | "text">> = {},
+  ): Promise<void> {
+    this.messages.push({ role, text, ...extra });
+    if (this.messages.length > 8) {
+      this.messages.splice(1, this.messages.length - 8);
+    }
+    await this.persistMessages();
+  }
+
+  private async runAction(action: Extract<MasiAction, "installRuntime" | "startApi" | "healthCheck" | "analyzeWorkspace">): Promise<void> {
+    await this.appendMessage("assistant", MAS_ACTIONS[action].reply);
+    await vscode.commands.executeCommand(MAS_ACTIONS[action].command);
+  }
+
+  private async syncFromHistory(): Promise<void> {
+    const nextTaskId = this.history.getActiveTaskId() ?? this.context.globalState.get<string>("masi.lastTaskId");
+    if (nextTaskId !== this.selectedTaskId) {
+      this.selectedTaskId = nextTaskId;
+    }
+    this.messages = this.loadMessages(this.selectedTaskId);
+    await this.refresh();
+  }
+
+  private async handlePrompt(prompt: string): Promise<void> {
+    await this.appendMessage("user", prompt);
+    try {
+      const smartReply = await requestBackendChatReply(prompt, this.context, this.output, this);
+      if (smartReply) {
+        if (smartReply.source_task_id) {
+          if (smartReply.source_task_id !== this.selectedTaskId) {
+            await this.setActiveTask(smartReply.source_task_id);
+            await this.appendMessage("user", prompt, { taskId: smartReply.source_task_id });
+          }
+        }
+        await this.appendMessage("assistant", smartReply.answer, {
+          taskId: smartReply.source_task_id,
+          cards: smartReply.cards ?? [],
+          followUpActions: smartReply.follow_up_actions ?? [],
+        });
+        if (smartReply.intent === "action" && smartReply.recommended_action) {
+          const action = smartReply.recommended_action as MasiAction;
+          if (action === "showLastTask") {
+            await vscode.commands.executeCommand(MAS_ACTIONS[action].command);
+          } else if (action === "installRuntime" || action === "startApi" || action === "healthCheck" || action === "analyzeWorkspace") {
+            await vscode.commands.executeCommand(MAS_ACTIONS[action].command);
+          }
+        }
+        await this.refresh();
+        return;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.output.appendLine(`MAS sidebar chat query failed: ${message}`);
+      await this.appendMessage("assistant", `I hit a backend problem while checking MAS state: ${message}`);
+      await this.refresh();
+      return;
+    }
+
+    const action = resolvePromptAction(prompt);
+    if (!action || action === "showLastTask" || action === "refreshSidebar" || action === "openSidebar") {
+      await this.appendMessage(
+        "assistant",
+        "I can answer repo/status/task questions, or help with: install runtime, start API, run health check, analyze the current workspace, or show the last task from the command palette.",
+      );
+      await this.refresh();
+      return;
+    }
+
+    await this.runAction(action);
+  }
+
   private getHtml(
     healthStatus: string,
-    tasks: TaskItem[],
+    _tasks: TaskItem[],
     selectedTask: TaskItem | undefined,
     runtimeStatus: RuntimeStatus,
   ): string {
-    const nonce = String(Date.now());
-    const runtimeLabel = runtimeStatus.pythonExists
-      ? "runtime ready"
-      : runtimeStatus.repoRootExists ? "runtime missing" : "repo not set";
-    const installButtonClass = runtimeStatus.pythonExists ? "action" : "action primary";
-    const taskCards = tasks.length > 0
-      ? tasks.map((task) => {
-          const result = task.result ?? {};
-          const selectedClass = task.task_id === selectedTask?.task_id ? " selected" : "";
-          return `
-            <button class="task-card${selectedClass}" data-task-id="${escapeHtml(task.task_id)}">
-              <span class="task-id">${escapeHtml(task.task_id)}</span>
-              <span class="task-status">${escapeHtml(task.status)}</span>
-              <span class="task-repo">${escapeHtml(task.repo_path)}</span>
-              <span class="task-meta">violations ${escapeHtml(String(result.violations_found ?? task.violations.length))} | repairs ${escapeHtml(String(result.repairs_proposed ?? task.repairs.length))}</span>
-            </button>
-          `;
-        }).join("")
-      : `<div class="empty">No MAS tasks yet. Run an analysis to populate this view.</div>`;
-
-    const selectedTaskMarkup = selectedTask
-      ? this.renderSelectedTask(selectedTask)
-      : `<div class="empty">Select a task to inspect violations, repairs, and hypotheses.</div>`;
-
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <style>
-    :root {
-      --bg: #0f1722;
-      --panel: #162131;
-      --panel-alt: #1c2b40;
-      --panel-soft: #23354e;
-      --text: #edf3ff;
-      --muted: #9fb0c8;
-      --accent: #4eb2ff;
-      --accent-strong: #0d8bff;
-      --border: #2b3e58;
-      --success: #3ddc97;
-      --warn: #ffb454;
-      --danger: #ff6b6b;
-    }
-
-    * { box-sizing: border-box; }
-
-    body {
-      margin: 0;
-      padding: 14px;
-      font-family: "Segoe UI", sans-serif;
-      background:
-        radial-gradient(circle at top right, rgba(78, 178, 255, 0.16), transparent 34%),
-        linear-gradient(180deg, #101722 0%, #0f1722 100%);
-      color: var(--text);
-    }
-
-    .shell { display: flex; flex-direction: column; gap: 14px; }
-    .hero, .task-panel, .detail-panel {
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      background: linear-gradient(180deg, rgba(22, 33, 49, 0.98), rgba(15, 23, 34, 0.94));
-      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
-    }
-
-    .hero {
-      padding: 14px;
-    }
-
-    .hero h2, .detail-panel h3, .task-panel h3 {
-      margin: 0 0 4px;
-      font-size: 14px;
-      font-weight: 700;
-      letter-spacing: 0.02em;
-    }
-
-    .hero p, .tiny, .meta-line {
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.5;
-      margin: 0;
-    }
-
-    .status-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-top: 12px;
-      padding-top: 12px;
-      border-top: 1px solid rgba(159, 176, 200, 0.15);
-    }
-
-    .health-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 10px;
-      border-radius: 999px;
-      background: rgba(28, 43, 64, 0.9);
-      border: 1px solid var(--border);
-      font-size: 12px;
-    }
-
-    .health-pill::before {
-      content: "";
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: ${healthStatus === "healthy" ? "var(--success)" : healthStatus === "offline" ? "var(--danger)" : "var(--warn)"};
-      box-shadow: 0 0 10px ${healthStatus === "healthy" ? "rgba(61, 220, 151, 0.8)" : healthStatus === "offline" ? "rgba(255, 107, 107, 0.8)" : "rgba(255, 180, 84, 0.8)"};
-    }
-
-    .health-pill.runtime::before {
-      background: ${runtimeStatus.pythonExists ? "var(--success)" : runtimeStatus.repoRootExists ? "var(--warn)" : "var(--danger)"};
-      box-shadow: 0 0 10px ${runtimeStatus.pythonExists ? "rgba(61, 220, 151, 0.8)" : runtimeStatus.repoRootExists ? "rgba(255, 180, 84, 0.8)" : "rgba(255, 107, 107, 0.8)"};
-    }
-
-    .actions {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-    }
-
-    .action, .task-card, .pill-button, .action-inline {
-      border: 1px solid var(--border);
-      background: linear-gradient(180deg, rgba(28, 43, 64, 0.98), rgba(17, 27, 40, 0.98));
-      color: var(--text);
-      cursor: pointer;
-      transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease;
-    }
-
-    .action {
-      padding: 11px 12px;
-      border-radius: 14px;
-      text-align: left;
-      font-size: 12px;
-      line-height: 1.4;
-    }
-
-    .action strong {
-      display: block;
-      margin-bottom: 3px;
-      font-size: 12px;
-    }
-
-    .action:hover, .task-card:hover, .pill-button:hover, .action-inline:hover {
-      transform: translateY(-1px);
-      border-color: var(--accent);
-    }
-
-    .action.primary {
-      background: linear-gradient(180deg, rgba(13, 139, 255, 0.95), rgba(8, 100, 190, 0.98));
-      border-color: rgba(78, 178, 255, 0.8);
-    }
-
-    .task-panel header, .detail-panel header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 12px 14px;
-      border-bottom: 1px solid rgba(159, 176, 200, 0.14);
-    }
-
-    .task-list, .detail-body {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      padding: 12px;
-    }
-
-    .task-card {
-      width: 100%;
-      border-radius: 14px;
-      padding: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      text-align: left;
-    }
-
-    .task-card.selected {
-      border-color: var(--accent);
-      background: linear-gradient(180deg, rgba(37, 63, 96, 0.98), rgba(20, 33, 48, 0.98));
-    }
-
-    .task-id {
-      font-weight: 700;
-      font-size: 12px;
-    }
-
-    .task-status, .task-meta, .task-repo {
-      color: var(--muted);
-      font-size: 11px;
-    }
-
-    .summary-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 8px;
-    }
-
-    .summary-card {
-      border: 1px solid rgba(159, 176, 200, 0.12);
-      border-radius: 14px;
-      padding: 10px;
-      background: var(--panel-soft);
-    }
-
-    .summary-card strong {
-      display: block;
-      font-size: 16px;
-    }
-
-    .section {
-      border: 1px solid rgba(159, 176, 200, 0.1);
-      border-radius: 14px;
-      padding: 10px;
-      background: rgba(19, 30, 45, 0.9);
-    }
-
-    .section h4 {
-      margin: 0 0 8px;
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--muted);
-    }
-
-    .item-list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    .item-card {
-      border: 1px solid rgba(159, 176, 200, 0.1);
-      border-radius: 12px;
-      padding: 10px;
-      background: var(--panel-alt);
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .item-card strong {
-      font-size: 12px;
-    }
-
-    .item-card p {
-      margin: 0;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.45;
-    }
-
-    .actions-row {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-
-    .pill-button, .action-inline {
-      border-radius: 999px;
-      padding: 6px 10px;
-      font-size: 11px;
-    }
-
-    .pill-button.approve {
-      background: linear-gradient(180deg, rgba(61, 220, 151, 0.28), rgba(17, 73, 55, 0.9));
-    }
-
-    .severity {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--muted);
-    }
-
-    .severity::before {
-      content: "";
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--warn);
-    }
-
-    .severity.high::before { background: var(--danger); }
-    .severity.medium::before { background: var(--warn); }
-    .severity.low::before { background: var(--success); }
-
-    .empty {
-      padding: 12px;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.5;
-    }
-  </style>
-</head>
-<body>
-  <div class="shell">
-    <section class="hero">
-      <h2>MAS Control Panel</h2>
-      <p>Install the runtime, launch the API, and run your multi-agent workflows without leaving the editor.</p>
-      <div class="status-row">
-        <span class="health-pill">API ${escapeHtml(healthStatus)}</span>
-        <span class="health-pill runtime">Runtime ${escapeHtml(runtimeLabel)}</span>
-        <span class="tiny">Polling every 15s</span>
-      </div>
-    </section>
-
-    <section class="actions">
-      <button class="${installButtonClass}" data-action="installRuntime"><strong>Install Runtime</strong>Set up the MAS Python environment in the configured repo.</button>
-      <button class="action" data-action="startApi"><strong>Start API</strong>Launch the MAS FastAPI service in a terminal.</button>
-      <button class="action" data-action="healthCheck"><strong>Health Check</strong>Ping the runtime and confirm availability.</button>
-      <button class="action primary" data-action="analyzeWorkspace"><strong>Analyze Workspace</strong>Run the full MAS pipeline for the open folder.</button>
-      <button class="action" data-action="refresh"><strong>Refresh Now</strong>Force a poll instead of waiting for the timer.</button>
-    </section>
-
-    <section class="task-panel">
-      <header>
-        <h3>Recent Tasks</h3>
-        <span class="tiny">${tasks.length} loaded</span>
-      </header>
-      <div class="task-list">
-        ${taskCards}
-      </div>
-    </section>
-
-    <section class="detail-panel">
-      <header>
-        <h3>Task Detail</h3>
-        <span class="tiny">${escapeHtml(selectedTask?.task_id ?? "none selected")}</span>
-      </header>
-      <div class="detail-body">
-        ${selectedTaskMarkup}
-      </div>
-    </section>
-  </div>
-
-  <script nonce="${nonce}">
-    const vscode = acquireVsCodeApi();
-    document.querySelectorAll("[data-action]").forEach((element) => {
-      element.addEventListener("click", () => {
-        vscode.postMessage({ type: element.getAttribute("data-action") });
-      });
+    return renderChatHtml(this.view!.webview, {
+      title: "MAS",
+      messages: this.messages,
+      runtimeStatus,
+      healthStatus,
+      selectedTask,
     });
-    document.querySelectorAll("[data-task-id]").forEach((element) => {
-      element.addEventListener("click", () => {
-        vscode.postMessage({ type: "selectTask", taskId: element.getAttribute("data-task-id") });
-      });
-    });
-    document.querySelectorAll("[data-open-task]").forEach((element) => {
-      element.addEventListener("click", () => {
-        vscode.postMessage({ type: "openTaskDocument", taskId: element.getAttribute("data-open-task") });
-      });
-    });
-    document.querySelectorAll("[data-approve-repair]").forEach((element) => {
-      element.addEventListener("click", () => {
-        vscode.postMessage({ type: "approveRepair", repairId: element.getAttribute("data-approve-repair") });
-      });
-    });
-    document.querySelectorAll("[data-show-violation]").forEach((element) => {
-      element.addEventListener("click", () => {
-        vscode.postMessage({
-          type: "showViolation",
-          taskId: element.getAttribute("data-task"),
-          violationId: element.getAttribute("data-show-violation"),
-        });
-      });
-    });
-  </script>
-</body>
-</html>`;
-  }
-
-  private renderSelectedTask(task: TaskItem): string {
-    const result = task.result ?? {};
-    const repairs = task.repairs.length > 0
-      ? task.repairs.map((repair) => {
-          const approveButton = repair.status === "proposed"
-            ? `<button class="pill-button approve" data-approve-repair="${escapeHtml(repair.repair_id)}">Approve repair</button>`
-            : "";
-          return `
-            <div class="item-card">
-              <strong>${escapeHtml(repair.repair_id)}</strong>
-              <p>${escapeHtml(repair.description)}</p>
-              <p class="meta-line">Rule: ${escapeHtml(repair.rule || "n/a")} | Status: ${escapeHtml(repair.status)}</p>
-              <div class="actions-row">${approveButton}</div>
-            </div>
-          `;
-        }).join("")
-      : `<div class="empty">No repair candidates for this task.</div>`;
-
-    const violations = task.violations.length > 0
-      ? task.violations.map((violation) => `
-          <div class="item-card">
-            <div class="severity ${escapeHtml(violation.severity.toLowerCase())}">${escapeHtml(violation.severity)}</div>
-            <strong>${escapeHtml(violation.rule)}</strong>
-            <p>${escapeHtml(violation.message)}</p>
-            <p class="meta-line">${escapeHtml(violation.file_path || "(no file path)")}</p>
-            <div class="actions-row">
-              <button class="action-inline" data-task="${escapeHtml(task.task_id)}" data-show-violation="${escapeHtml(violation.violation_id)}">Open detail</button>
-            </div>
-          </div>
-        `).join("")
-      : `<div class="empty">No violations recorded for this task.</div>`;
-
-    const hypotheses = task.hypotheses.length > 0
-      ? task.hypotheses.map((hypothesis) => `
-          <div class="item-card">
-            <strong>${escapeHtml(hypothesis.title)}</strong>
-            <p>${escapeHtml(hypothesis.summary)}</p>
-          </div>
-        `).join("")
-      : `<div class="empty">No hypotheses generated for this task.</div>`;
-
-    return `
-      <div class="summary-grid">
-        <div class="summary-card">
-          <strong>${escapeHtml(String(result.violations_found ?? task.violations.length))}</strong>
-          <span class="tiny">Violations</span>
-        </div>
-        <div class="summary-card">
-          <strong>${escapeHtml(String(result.hypotheses_generated ?? task.hypotheses.length))}</strong>
-          <span class="tiny">Hypotheses</span>
-        </div>
-        <div class="summary-card">
-          <strong>${escapeHtml(String(result.repairs_proposed ?? task.repairs.length))}</strong>
-          <span class="tiny">Repairs</span>
-        </div>
-      </div>
-
-      <div class="section">
-        <h4>Overview</h4>
-        <p class="meta-line">Repo: ${escapeHtml(task.repo_path)}</p>
-        <p class="meta-line">Created: ${escapeHtml(task.created_at)}</p>
-        <p class="meta-line">Status: ${escapeHtml(task.status)}</p>
-        <div class="actions-row" style="margin-top:8px;">
-          <button class="action-inline" data-open-task="${escapeHtml(task.task_id)}">Open Markdown Report</button>
-        </div>
-      </div>
-
-      <div class="section">
-        <h4>Violations</h4>
-        <div class="item-list">${violations}</div>
-      </div>
-
-      <div class="section">
-        <h4>Repair Actions</h4>
-        <div class="item-list">${repairs}</div>
-      </div>
-
-      <div class="section">
-        <h4>Hypotheses</h4>
-        <div class="item-list">${hypotheses}</div>
-      </div>
-    `;
   }
 }
 
 class MasiPanel {
   private static currentPanel: MasiPanel | undefined;
-  private readonly messages: PanelChatMessage[] = [
-    {
-      role: "assistant",
-      text: "You made it to the MAS control panel. Ask me to install the runtime, start the API, run a health check, analyze this workspace, or show the last task.",
-    },
-  ];
+  private messages: PanelChatMessage[];
+  private selectedTaskId?: string;
+  private readonly historySubscription: vscode.Disposable;
 
   public static createOrShow(
     context: vscode.ExtensionContext,
     output: vscode.OutputChannel,
     sidebar: MasiSidebarProvider,
+    history: ChatHistoryStore,
   ): void {
     const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
     if (MasiPanel.currentPanel) {
@@ -1228,7 +1228,7 @@ class MasiPanel {
       },
     );
 
-    MasiPanel.currentPanel = new MasiPanel(panel, context, output, sidebar);
+    MasiPanel.currentPanel = new MasiPanel(panel, context, output, sidebar, history);
   }
 
   private constructor(
@@ -1236,9 +1236,16 @@ class MasiPanel {
     private readonly context: vscode.ExtensionContext,
     private readonly output: vscode.OutputChannel,
     private readonly sidebar: MasiSidebarProvider,
+    private readonly history: ChatHistoryStore,
   ) {
+    this.selectedTaskId = this.history.getActiveTaskId() ?? this.context.globalState.get<string>("masi.lastTaskId");
+    this.messages = this.loadMessages(this.selectedTaskId);
+    this.historySubscription = this.history.subscribe(() => {
+      void this.syncFromHistory();
+    });
     this.render();
     this.panel.onDidDispose(() => {
+      this.historySubscription.dispose();
       MasiPanel.currentPanel = undefined;
     });
 
@@ -1256,86 +1263,98 @@ class MasiPanel {
   }
 
   private render(): void {
-    this.panel.webview.html = getPanelHtml(this.panel.webview, this.messages);
+    this.panel.webview.html = getPanelHtml(
+      this.panel.webview,
+      this.messages,
+      getRuntimeStatus(),
+      "unknown",
+    );
   }
 
-  private appendMessage(role: PanelChatMessage["role"], text: string): void {
-    this.messages.push({ role, text });
+  private loadMessages(taskId?: string): PanelChatMessage[] {
+    const stored = this.history.load(taskId);
+    return stored.length > 0 ? stored : getDefaultChatMessages();
+  }
+
+  private async persistMessages(): Promise<void> {
+    await this.history.save(this.messages, this.selectedTaskId);
+  }
+
+  private async appendMessage(
+    role: PanelChatMessage["role"],
+    text: string,
+    extra: Partial<Omit<PanelChatMessage, "role" | "text">> = {},
+  ): Promise<void> {
+    this.messages.push({ role, text, ...extra });
+    if (this.messages.length > 12) {
+      this.messages.splice(1, this.messages.length - 12);
+    }
+    await this.persistMessages();
+    this.render();
+  }
+
+  private async setActiveTask(taskId?: string): Promise<void> {
+    this.selectedTaskId = taskId;
+    this.messages = this.loadMessages(taskId);
+    await this.context.globalState.update("masi.lastTaskId", taskId);
+    await this.history.setActiveTaskId(taskId);
+  }
+
+  private async syncFromHistory(): Promise<void> {
+    const nextTaskId = this.history.getActiveTaskId() ?? this.context.globalState.get<string>("masi.lastTaskId");
+    this.selectedTaskId = nextTaskId;
+    this.messages = this.loadMessages(nextTaskId);
     this.render();
   }
 
   private async handleAction(action: string): Promise<void> {
-    const actionMap: Record<string, { command: string; reply: string }> = {
-      installRuntime: {
-        command: "masi.installRuntime",
-        reply: "Started the MAS runtime install flow. Check the MAS Install terminal if you want the live setup output.",
-      },
-      startApi: {
-        command: "masi.startApi",
-        reply: "Starting the MAS API now. Once it is up, run a health check or jump straight into analysis.",
-      },
-      healthCheck: {
-        command: "masi.healthCheck",
-        reply: "Running a MAS health check now.",
-      },
-      analyzeWorkspace: {
-        command: "masi.analyzeWorkspace",
-        reply: "Submitting the current workspace to MAS for analysis.",
-      },
-      showLastTask: {
-        command: "masi.showLastTask",
-        reply: "Opening the latest MAS task summary.",
-      },
-      refreshSidebar: {
-        command: "masi.refreshSidebar",
-        reply: "Refreshing the MAS sidebar.",
-      },
-      openSidebar: {
-        command: "workbench.view.extension.masi",
-        reply: "Opening the MAS sidebar.",
-      },
-    };
-
-    const item = actionMap[action];
+    const item = MAS_ACTIONS[action as MasiAction];
     if (!item) {
-      this.appendMessage("assistant", "I do not recognize that MAS action yet.");
+      await this.appendMessage("assistant", "I do not recognize that MAS action yet.");
       return;
     }
 
     await vscode.commands.executeCommand(item.command);
-    this.appendMessage("assistant", item.reply);
+    await this.appendMessage("assistant", item.reply);
   }
 
   private async handlePrompt(prompt: string): Promise<void> {
-    const normalized = prompt.toLowerCase();
-    this.appendMessage("user", prompt);
+    await this.appendMessage("user", prompt);
 
-    if (normalized.includes("install") || normalized.includes("setup") || normalized.includes("runtime")) {
-      await this.handleAction("installRuntime");
-      return;
-    }
-    if ((normalized.includes("start") || normalized.includes("launch")) && normalized.includes("api")) {
-      await this.handleAction("startApi");
-      return;
-    }
-    if (normalized.includes("health") || normalized.includes("status") || normalized.includes("ping")) {
-      await this.handleAction("healthCheck");
-      return;
-    }
-    if (normalized.includes("analyze") || normalized.includes("scan") || normalized.includes("inspect workspace")) {
-      await this.handleAction("analyzeWorkspace");
-      return;
-    }
-    if (normalized.includes("last task") || normalized.includes("latest task") || normalized.includes("show task")) {
-      await this.handleAction("showLastTask");
-      return;
-    }
-    if (normalized.includes("sidebar")) {
-      await this.handleAction("openSidebar");
+    try {
+      const smartReply = await requestBackendChatReply(prompt, this.context, this.output, this.sidebar);
+      if (smartReply) {
+        if (smartReply.source_task_id) {
+          await this.setActiveTask(smartReply.source_task_id);
+          await this.appendMessage("user", prompt, { taskId: smartReply.source_task_id });
+        }
+        await this.appendMessage("assistant", smartReply.answer, {
+          taskId: smartReply.source_task_id,
+          cards: smartReply.cards ?? [],
+          followUpActions: smartReply.follow_up_actions ?? [],
+        });
+        if (smartReply.intent === "action" && smartReply.recommended_action) {
+          const action = smartReply.recommended_action as MasiAction;
+          if (MAS_ACTIONS[action]) {
+            await vscode.commands.executeCommand(MAS_ACTIONS[action].command);
+          }
+        }
+        return;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.output.appendLine(`MAS panel chat query failed: ${message}`);
+      await this.appendMessage("assistant", `I hit a backend problem while checking MAS state: ${message}`);
       return;
     }
 
-    this.appendMessage(
+    const action = resolvePromptAction(prompt);
+    if (action) {
+      await this.handleAction(action);
+      return;
+    }
+
+    await this.appendMessage(
       "assistant",
       "I can help with: install runtime, start API, run health check, analyze the current workspace, show the last task, or open the sidebar.",
     );
@@ -1356,6 +1375,15 @@ async function runAnalyzeWorkspace(
   output.show(true);
   output.appendLine(`Submitting analysis for ${folder.uri.fsPath}`);
   try {
+    const apiReady = await ensureApiAvailable(output, sidebar, {
+      revealTerminal: false,
+      reason: "analysis request",
+    });
+    if (!apiReady) {
+      void vscode.window.showErrorMessage("MAS API is not ready yet. Start the runtime or check the MAS API terminal.");
+      return;
+    }
+
     const submit = await requestJson<{ task_id: string }>("POST", "/api/v1/tasks", {
       task_type: "analysis",
       repo_path: folder.uri.fsPath,
@@ -1399,7 +1427,8 @@ async function installRuntime(
 
 export function activate(context: vscode.ExtensionContext) {
   const output = createOutputChannel();
-  const sidebar = new MasiSidebarProvider(context, output);
+  const history = new ChatHistoryStore(context);
+  const sidebar = new MasiSidebarProvider(context, output, history);
 
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusItem.text = "$(hubot) MAS";
@@ -1415,7 +1444,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("masi.openPanel", async () => {
-      MasiPanel.createOrShow(context, output, sidebar);
+      MasiPanel.createOrShow(context, output, sidebar, history);
     }),
   );
 
@@ -1427,20 +1456,10 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("masi.startApi", async () => {
-      const repoRoot = await ensureRepoRootConfigured();
-      if (!repoRoot) {
-        return;
-      }
-
-      const { pythonPath } = getConfig();
-      const terminal = vscode.window.createTerminal({
-        name: "MAS API",
-        cwd: repoRoot,
+      await startApiProcess(output, sidebar, {
+        revealTerminal: true,
+        reason: "manual start",
       });
-      terminal.show(true);
-      terminal.sendText(`"${pythonPath}" -m uvicorn src.api.app:create_app --factory --host 127.0.0.1 --port 8000`);
-      output.appendLine(`Started MAS API terminal in ${repoRoot}`);
-      await sidebar.refresh();
     }),
   );
 
@@ -1448,6 +1467,13 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("masi.healthCheck", async () => {
       output.show(true);
       try {
+        const apiReady = await ensureApiAvailable(output, sidebar, {
+          revealTerminal: false,
+          reason: "health check",
+        });
+        if (!apiReady) {
+          throw new Error("API offline and runtime is not installed yet.");
+        }
         const response = await requestJson<JsonObject>("GET", "/health");
         output.appendLine(`Health: ${JSON.stringify(response)}`);
         void vscode.window.showInformationMessage(`MAS health: ${String(response.status ?? "unknown")}`);

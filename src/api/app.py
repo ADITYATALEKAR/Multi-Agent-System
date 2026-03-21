@@ -5,7 +5,7 @@ from __future__ import annotations
 import structlog
 from fastapi import FastAPI
 
-from src.api.routes import graph, health, memory, repairs, tasks, violations
+from src.api.routes import chat, graph, health, memory, repairs, tasks, violations
 
 log = structlog.get_logger(__name__)
 
@@ -26,6 +26,7 @@ def create_app() -> FastAPI:
     app.include_router(tasks.router)
     app.include_router(violations.router)
     app.include_router(repairs.router)
+    app.include_router(chat.router)
     app.include_router(health.router)
     app.include_router(graph.router)
     app.include_router(memory.router)
@@ -37,5 +38,5 @@ def create_app() -> FastAPI:
     app.state.auth = AuthMiddleware()
     app.state.rate_limiter = RateLimiter()
 
-    log.info("app_created", routers=6)
+    log.info("app_created", routers=7)
     return app

@@ -2,7 +2,7 @@
   "name": "mas-agent",
   "displayName": "MAS",
   "description": "Install and control the MAS multi-agent system from VS Code.",
-  "version": "0.0.2",
+  "version": "0.0.5",
   "publisher": "FundamentalLabs",
   "license": "SEE LICENSE IN LICENSE.txt",
   "icon": "media/mas-icon.png",
@@ -88,7 +88,8 @@
         {
           "id": "masi.sidebar",
           "name": "Control Panel",
-          "type": "webview"
+          "type": "webview",
+          "icon": "media/masi.svg"
         }
       ]
     },

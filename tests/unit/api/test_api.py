@@ -1,14 +1,13 @@
-from __future__ import annotations
-
 """Unit tests for the Phase 6 API layer: routes, auth, and rate limiter."""
 
-import pytest
+from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
+
 from src.api.app import create_app
 from src.api.auth import AuthMiddleware
 from src.api.middleware import RateLimiter
-
 
 # ---------------------------------------------------------------------------
 # Fixture
@@ -139,6 +138,51 @@ def test_search_episodes(client):
     body = resp.json()
     assert "episodes" in body
     assert body["query"] == "test"
+
+
+# ---------------------------------------------------------------------------
+# Chat endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_chat_status(client):
+    """POST /api/v1/chat -> status-aware response with backend reasoning."""
+    resp = client.post("/api/v1/chat", json={"prompt": "what is the MAS status?"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["intent"] == "answer"
+    assert "MAS is healthy" in body["answer"]
+    assert "cards" in body
+    assert "follow_up_actions" in body
+
+
+def test_chat_summarizes_latest_task(client):
+    """Chat can summarize the latest analysis task from runtime state."""
+    submit = client.post("/api/v1/tasks", json={"task_type": "analysis"})
+    task_id = submit.json()["task_id"]
+    resp = client.post(
+        "/api/v1/chat",
+        json={
+            "prompt": "summarize the latest analysis",
+            "task_id": task_id,
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["intent"] == "answer"
+    assert body["source_task_id"] == task_id
+    assert task_id in body["answer"]
+    assert "violations" in body["answer"]
+
+
+def test_chat_can_recommend_action(client):
+    """Chat can return a backend-selected action recommendation."""
+    resp = client.post("/api/v1/chat", json={"prompt": "analyze this workspace"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["intent"] == "action"
+    assert body["recommended_action"] == "analyzeWorkspace"
+    assert body["follow_up_actions"][0]["action"] == "analyzeWorkspace"
 
 
 # ---------------------------------------------------------------------------
