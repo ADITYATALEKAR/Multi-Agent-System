@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -152,6 +154,11 @@ def test_chat_status(client):
     body = resp.json()
     assert body["intent"] == "answer"
     assert "MAS is healthy" in body["answer"]
+    assert body["summary"]
+    assert "suggestions" in body
+    assert "next_step" in body
+    assert "files_changed" in body
+    assert "code_changes" in body
     assert "cards" in body
     assert "follow_up_actions" in body
 
@@ -173,6 +180,10 @@ def test_chat_summarizes_latest_task(client):
     assert body["source_task_id"] == task_id
     assert task_id in body["answer"]
     assert "violations" in body["answer"]
+    assert body["actions_taken"]
+    assert body["files_in_focus"]
+    assert "files_changed" in body
+    assert "code_changes" in body
 
 
 def test_chat_can_recommend_action(client):
@@ -193,6 +204,83 @@ def test_chat_can_recommend_llm_connection(client):
     assert body["intent"] == "action"
     assert body["recommended_action"] == "configureProvider"
     assert body["follow_up_actions"][0]["action"] == "configureProvider"
+
+
+def test_chat_can_describe_changes_for_latest_task(client):
+    """Chat can explain task progress in a more agent-style shape."""
+    submit = client.post("/api/v1/tasks", json={"task_type": "analysis"})
+    task_id = submit.json()["task_id"]
+    resp = client.post("/api/v1/chat", json={"prompt": "what changed?", "task_id": task_id})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["source_task_id"] == task_id
+    assert body["summary"]
+    assert "actions_taken" in body
+    assert "files_in_focus" in body
+    assert "files_changed" in body
+    assert "code_changes" in body
+
+
+def test_chat_can_inspect_a_specific_file(client):
+    """Chat can inspect a concrete file path from the workspace."""
+    resp = client.post(
+        "/api/v1/chat",
+        json={
+            "prompt": "explain file src/runtime/chat.py",
+            "repo_path": str(Path.cwd()),
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "src/runtime/chat.py" in body["answer"] or "chat.py" in body["answer"]
+    assert body["summary"]
+    assert body["files_in_focus"]
+    assert body["code_changes"]
+
+
+def test_chat_can_prepare_an_edit_plan_for_a_file(client):
+    """Chat can suggest a safe edit plan for a concrete file."""
+    resp = client.post(
+        "/api/v1/chat",
+        json={
+            "prompt": "how should we edit src/runtime/chat.py",
+            "repo_path": str(Path.cwd()),
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["summary"]
+    assert body["actions_taken"]
+    assert body["files_in_focus"]
+    assert body["next_step"]
+    assert body["cards"]
+
+
+def test_chat_can_focus_on_a_symbol_inside_a_file(client):
+    """Chat can inspect a specific symbol within a file."""
+    resp = client.post(
+        "/api/v1/chat",
+        json={
+            "prompt": "explain function answer in src/runtime/chat.py",
+            "repo_path": str(Path.cwd()),
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["symbols_in_focus"]
+    assert "answer" in " ".join(body["symbols_in_focus"]).lower()
+
+
+def test_chat_can_recommend_applying_approved_edits(client):
+    """Chat can explicitly switch into the apply-approved-edits action."""
+    resp = client.post(
+        "/api/v1/chat",
+        json={"prompt": "apply approved edits to src/runtime/chat.py"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["intent"] == "action"
+    assert body["recommended_action"] == "applyApprovedEdits"
 
 
 # ---------------------------------------------------------------------------

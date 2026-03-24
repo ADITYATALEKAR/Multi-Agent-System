@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.7
+
+- Upgraded MAS chat into a more agent-like teammate with structured `summary`, `actions taken`, `files changed`, `code changes`, `suggestions`, and `next step` sections.
+- Added workspace-aware diff inspection so MAS can talk about live Git changes and compact code snippets.
+- Added file-level and symbol-level inspection prompts such as `explain file ...` and `explain function ...`.
+- Added grouped patch planning and a guarded `Apply Approved Edits` flow with confirmation, before/after snippets, and targeted validation reporting.
+
 ## 0.0.6
 
 - Added `Connect To LLM` so users can plug MAS into OpenAI, Anthropic, DeepSeek, Kimi, OpenRouter, or another OpenAI-compatible API.

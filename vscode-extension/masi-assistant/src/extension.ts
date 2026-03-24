@@ -1,3 +1,4 @@
+import { execFile } from "child_process";
 import * as fs from "fs";
 import * as http from "http";
 import * as https from "https";
@@ -50,6 +51,15 @@ interface PanelChatMessage {
   role: "assistant" | "user";
   text: string;
   taskId?: string;
+  summary?: string;
+  actionsTaken?: string[];
+  filesInFocus?: string[];
+  filesChanged?: string[];
+  codeChanges?: string[];
+  symbolsInFocus?: string[];
+  validationResults?: string[];
+  suggestions?: string[];
+  nextStep?: string;
   cards?: ChatCard[];
   followUpActions?: FollowUpAction[];
 }
@@ -59,6 +69,14 @@ interface BackendChatResponse {
   intent: "answer" | "action";
   recommended_action?: string;
   source_task_id?: string;
+  summary?: string;
+  actions_taken?: string[];
+  files_in_focus?: string[];
+  files_changed?: string[];
+  code_changes?: string[];
+  symbols_in_focus?: string[];
+  suggestions?: string[];
+  next_step?: string;
   highlights?: string[];
   cards?: ChatCard[];
   follow_up_actions?: FollowUpAction[];
@@ -74,6 +92,19 @@ interface ChatCard {
 interface FollowUpAction {
   action: string;
   label: string;
+}
+
+interface AppliedEditResult {
+  text: string;
+  summary?: string;
+  actionsTaken?: string[];
+  filesInFocus?: string[];
+  filesChanged?: string[];
+  codeChanges?: string[];
+  symbolsInFocus?: string[];
+  validationResults?: string[];
+  suggestions?: string[];
+  nextStep?: string;
 }
 
 interface StoredAiProviderConfig {
@@ -362,18 +393,7 @@ class ChatHistoryStore {
 }
 
 function getDefaultChatMessages(): PanelChatMessage[] {
-  return [
-    {
-      role: "assistant",
-      text: "MAS is ready. Connect an LLM once, then type instructions in English. No login flow, just your API key and your prompt.",
-      followUpActions: [
-        { action: "healthCheck", label: "health" },
-        { action: "showLastTask", label: "last task" },
-        { action: "analyzeWorkspace", label: "analyze" },
-        { action: "configureProvider", label: "connect llm" },
-      ],
-    },
-  ];
+  return [];
 }
 
 type MasiAction =
@@ -383,6 +403,7 @@ type MasiAction =
   | "analyzeWorkspace"
   | "showLastTask"
   | "configureProvider"
+  | "applyApprovedEdits"
   | "refreshSidebar"
   | "openSidebar";
 
@@ -410,6 +431,10 @@ const MAS_ACTIONS: Record<MasiAction, { command: string; reply: string }> = {
   configureProvider: {
     command: "masi.configureProvider",
     reply: "Opening the LLM connection flow so you can add or change an API key and model.",
+  },
+  applyApprovedEdits: {
+    command: "masi.applyApprovedEdits",
+    reply: "Applying the approved edit now. MAS will report the file changes back here.",
   },
   refreshSidebar: {
     command: "masi.refreshSidebar",
@@ -441,6 +466,9 @@ function resolvePromptAction(prompt: string): MasiAction | undefined {
   if (normalized.includes("api key") || normalized.includes("provider") || normalized.includes("model")) {
     return "configureProvider";
   }
+  if (normalized.includes("apply approved") || normalized.includes("apply the patch") || normalized.includes("make the change")) {
+    return "applyApprovedEdits";
+  }
   if (normalized.includes("sidebar")) {
     return "openSidebar";
   }
@@ -465,9 +493,38 @@ interface ChatRenderState {
   selectedTask?: TaskItem;
 }
 
+function renderStructuredSection(title: string, value?: string, items: string[] = []): string {
+  if (!value && items.length === 0) {
+    return "";
+  }
+  const renderedItems = items.length > 0
+    ? `<div class="structured-list">${items.map((item) => `<div class="structured-item">${escapeHtml(item)}</div>`).join("")}</div>`
+    : "";
+  return `
+    <div class="info-card structured-card">
+      <div class="card-title">${escapeHtml(title)}</div>
+      ${value ? `<div class="card-body">${escapeHtml(value)}</div>` : ""}
+      ${renderedItems}
+    </div>
+  `;
+}
+
 function renderMessageCards(message: PanelChatMessage): string {
   const cards = message.cards ?? [];
   const followUpActions = message.followUpActions ?? [];
+  const structuredMarkup = message.role === "assistant"
+    ? [
+      renderStructuredSection("summary:", message.summary),
+      renderStructuredSection("actions taken:", undefined, message.actionsTaken ?? []),
+      renderStructuredSection("files in focus:", undefined, message.filesInFocus ?? []),
+      renderStructuredSection("symbols in focus:", undefined, message.symbolsInFocus ?? []),
+      renderStructuredSection("files changed:", undefined, message.filesChanged ?? []),
+      renderStructuredSection("code changes:", undefined, message.codeChanges ?? []),
+      renderStructuredSection("validation:", undefined, message.validationResults ?? []),
+      renderStructuredSection("suggestions:", undefined, message.suggestions ?? []),
+        renderStructuredSection("next step:", message.nextStep),
+      ].join("")
+    : "";
   const cardMarkup = cards.length > 0
     ? `<div class="card-list">${cards.map((card) => `
         <div class="info-card">
@@ -477,12 +534,13 @@ function renderMessageCards(message: PanelChatMessage): string {
         </div>
       `).join("")}</div>`
     : "";
+  const structuredCards = structuredMarkup ? `<div class="card-list">${structuredMarkup}</div>` : "";
   const followUpsMarkup = followUpActions.length > 0
     ? `<div class="follow-ups"><span class="meta-label">options:</span>${followUpActions.map((item) => `
         <button class="chip" data-action="${escapeHtml(item.action)}">${escapeHtml(item.label)}</button>
       `).join("")}</div>`
     : "";
-  return cardMarkup + followUpsMarkup;
+  return structuredCards + cardMarkup + followUpsMarkup;
 }
 
 function renderMessages(messages: PanelChatMessage[]): string {
@@ -495,42 +553,6 @@ function renderMessages(messages: PanelChatMessage[]): string {
       </div>
     </div>
   `).join("");
-}
-
-function renderWelcomeState(messages: PanelChatMessage[]): string {
-  const hasConversation = messages.some((message) => message.role === "user");
-  if (hasConversation) {
-    return "";
-  }
-
-  const examplePrompts = [
-    "connect to ChatGPT and use gpt-4.1",
-    "start the api and check health",
-    "analyze this workspace",
-    "summarize the latest task",
-  ];
-
-  return `
-    <div class="welcome-card">
-      <div class="welcome-kicker">welcome:</div>
-      <div class="welcome-title">Connect an LLM and tell MAS what you want.</div>
-      <div class="welcome-copy">
-        Use one API key, type in English, and let MAS translate that into the right local agent actions.
-      </div>
-      <div class="welcome-section">
-        <div class="welcome-label">try prompts:</div>
-        <div class="chip-row">
-          ${examplePrompts.map((prompt) => `
-            <button class="chip example-chip" data-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>
-          `).join("")}
-        </div>
-      </div>
-      <div class="welcome-section">
-        <div class="welcome-label">quick start:</div>
-        <div class="welcome-copy">1. connect llm  2. paste api key  3. type what you want</div>
-      </div>
-    </div>
-  `;
 }
 
 function renderTaskSummary(task: TaskItem | undefined): string {
@@ -566,7 +588,6 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
       <button class="chip" data-action="configureProvider">${state.providerSummary === 'not connected' ? 'connect llm' : 'change llm'}</button>
     `;
   const transcript = renderMessages(state.messages);
-  const welcomeState = renderWelcomeState(state.messages);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -612,6 +633,11 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
       border-bottom: 1px solid var(--border);
       background: var(--bg);
     }
+    .topbar-left, .topbar-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
     .brand {
       font-size: 18px;
       font-weight: 700;
@@ -625,21 +651,71 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
     }
     .dashboard {
       display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      padding: 12px 20px;
+      flex-direction: column;
+      gap: 8px;
+      padding: 8px 20px 12px;
       border-bottom: 1px solid var(--border);
       background: linear-gradient(180deg, #050505 0%, #020202 100%);
     }
+    .dashboard.hidden {
+      display: none;
+    }
     .category {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.02);
+      overflow: hidden;
+    }
+    .category[open] {
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .category-summary {
       display: flex;
       align-items: center;
-      flex-wrap: wrap;
-      gap: 8px;
+      justify-content: space-between;
+      gap: 12px;
       padding: 10px 12px;
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      background: rgba(255, 255, 255, 0.02);
+      cursor: pointer;
+      list-style: none;
+    }
+    .category-summary::-webkit-details-marker {
+      display: none;
+    }
+    .category-summary-main {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1;
+    }
+    .category-copy {
+      min-width: 0;
+      flex: 1;
+    }
+    .category-text {
+      color: var(--soft);
+      font-size: 12px;
+      line-height: 1.4;
+      font-family: "Segoe UI", sans-serif;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .category-arrow {
+      color: var(--soft);
+      font-size: 11px;
+      transition: transform 120ms ease;
+      font-family: "Segoe UI Symbol", "Segoe UI", sans-serif;
+    }
+    .category[open] .category-arrow {
+      transform: rotate(90deg);
+    }
+    .category-body {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 0 12px 10px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
     }
     .category-label {
       color: var(--text);
@@ -684,71 +760,6 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
       display: flex;
       flex-direction: column;
       gap: 18px;
-    }
-    .hero {
-      padding: 38px 18px 10px;
-      text-align: center;
-      color: var(--muted);
-      font-family: "Segoe UI", sans-serif;
-    }
-    .hero-title {
-      font-size: 42px;
-      line-height: 1.05;
-      color: var(--text);
-      margin-bottom: 10px;
-      font-family: Georgia, "Times New Roman", serif;
-      font-weight: 700;
-    }
-    .hero-copy {
-      font-size: 15px;
-      max-width: 560px;
-      margin: 0 auto;
-      line-height: 1.7;
-    }
-    .welcome-card {
-      width: min(100%, 760px);
-      margin: 0 auto 6px;
-      padding: 20px 22px;
-      border: 1px solid var(--border);
-      border-radius: 28px;
-      background: linear-gradient(180deg, #090909 0%, #060606 100%);
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-    }
-    .welcome-kicker {
-      color: var(--soft);
-      font-size: 11px;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      font-family: "Segoe UI", sans-serif;
-      font-weight: 700;
-    }
-    .welcome-title {
-      font-size: 28px;
-      line-height: 1.15;
-      color: var(--text);
-    }
-    .welcome-copy {
-      color: var(--muted);
-      font-size: 14px;
-      line-height: 1.7;
-      font-family: "Segoe UI", sans-serif;
-    }
-    .welcome-section {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .welcome-label {
-      color: var(--text);
-      font-size: 12px;
-      font-weight: 700;
-      text-transform: lowercase;
-      font-family: "Segoe UI", sans-serif;
-    }
-    .example-chip {
-      text-align: left;
     }
     .message-row {
       display: flex;
@@ -817,6 +828,30 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
       white-space: pre-wrap;
       font-family: "Segoe UI", sans-serif;
     }
+    .structured-card {
+      gap: 6px;
+    }
+    .structured-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .structured-item {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+      font-family: "Segoe UI", sans-serif;
+      padding-left: 12px;
+      position: relative;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .structured-item::before {
+      content: "-";
+      color: var(--soft);
+      position: absolute;
+      left: 0;
+    }
     .chip {
       border: 1px solid var(--border);
       background: rgba(255, 255, 255, 0.02);
@@ -829,6 +864,29 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
     }
     .chip:hover {
       border-color: #ffffff;
+    }
+    .workspace-toggle {
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.02);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 7px 12px;
+      cursor: pointer;
+      font-size: 12px;
+      font-family: "Segoe UI", sans-serif;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .workspace-toggle-arrow {
+      color: var(--soft);
+      font-size: 11px;
+      transition: transform 120ms ease;
+      font-family: "Segoe UI Symbol", "Segoe UI", sans-serif;
+    }
+    .workspace-toggle.open .workspace-toggle-arrow {
+      transform: rotate(90deg);
     }
     .composer {
       position: absolute;
@@ -895,32 +953,65 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
 <body>
   <div class="shell">
     <div class="topbar">
-      <div class="brand">${escapeHtml(state.title)}</div>
-      <div class="topbar-meta">${escapeHtml(setupParts)}</div>
+      <div class="topbar-left">
+        <div class="brand">${escapeHtml(state.title)}</div>
+        <button class="workspace-toggle" id="workspaceToggle">
+          <span>workspace</span>
+          <span class="workspace-toggle-arrow">▸</span>
+        </button>
+      </div>
+      <div class="topbar-right">
+        <div class="topbar-meta">${escapeHtml(setupParts)}</div>
+      </div>
     </div>
-    <div class="dashboard">
-      <div class="category">
-        <div class="category-label">system:</div>
-        <div class="chip-row">${systemButtons}</div>
-      </div>
-      <div class="category">
-        <div class="category-label">llm:</div>
-        <div class="meta-line">${escapeHtml(state.providerSummary)}</div>
-        <div class="chip-row">${modelButtons}</div>
-      </div>
-      <div class="category">
-        <div class="category-label">task:</div>
-        <div class="meta-line">${renderTaskSummary(state.selectedTask)}</div>
-      </div>
+    <div class="dashboard hidden" id="workspacePanel">
+      <details class="category">
+        <summary class="category-summary">
+          <div class="category-summary-main">
+            <div class="category-label">system:</div>
+            <div class="category-copy">
+              <div class="category-text">setup | start api | health | analyze | last task</div>
+            </div>
+          </div>
+          <div class="category-arrow">▸</div>
+        </summary>
+        <div class="category-body">
+          <div class="chip-row">${systemButtons}</div>
+        </div>
+      </details>
+      <details class="category">
+        <summary class="category-summary">
+          <div class="category-summary-main">
+            <div class="category-label">llm:</div>
+            <div class="category-copy">
+              <div class="category-text">${escapeHtml(state.providerSummary)}</div>
+            </div>
+          </div>
+          <div class="category-arrow">▸</div>
+        </summary>
+        <div class="category-body">
+          <div class="meta-line">${escapeHtml(state.providerSummary)}</div>
+          <div class="chip-row">${modelButtons}</div>
+        </div>
+      </details>
+      <details class="category">
+        <summary class="category-summary">
+          <div class="category-summary-main">
+            <div class="category-label">task:</div>
+            <div class="category-copy">
+              <div class="category-text">${renderTaskSummary(state.selectedTask)}</div>
+            </div>
+          </div>
+          <div class="category-arrow">▸</div>
+        </summary>
+        <div class="category-body">
+          <div class="meta-line">${renderTaskSummary(state.selectedTask)}</div>
+        </div>
+      </details>
     </div>
     <div class="chat">
       <div class="messages">
         <div class="messages-inner">
-          <div class="hero">
-            <div class="hero-title">MAS</div>
-            <div class="hero-copy">Connect an LLM, type what you want in plain English, and let MAS turn it into local agent actions.</div>
-          </div>
-          ${welcomeState}
           ${transcript}
         </div>
       </div>
@@ -937,18 +1028,21 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
   </div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
+    const state = vscode.getState() || { workspaceOpen: false };
+    const workspacePanel = document.getElementById('workspacePanel');
+    const workspaceToggle = document.getElementById('workspaceToggle');
+    const setWorkspaceOpen = (isOpen) => {
+      workspacePanel.classList.toggle('hidden', !isOpen);
+      workspaceToggle.classList.toggle('open', isOpen);
+      vscode.setState({ workspaceOpen: isOpen });
+    };
+    setWorkspaceOpen(Boolean(state.workspaceOpen));
+    workspaceToggle.addEventListener('click', () => {
+      setWorkspaceOpen(workspacePanel.classList.contains('hidden'));
+    });
     document.querySelectorAll('[data-action]').forEach((element) => {
       element.addEventListener('click', () => {
         vscode.postMessage({ type: element.getAttribute('data-action') });
-      });
-    });
-    document.querySelectorAll('[data-prompt]').forEach((element) => {
-      element.addEventListener('click', () => {
-        const text = element.getAttribute('data-prompt');
-        if (!text) {
-          return;
-        }
-        vscode.postMessage({ type: 'prompt', text });
       });
     });
     const promptInput = document.getElementById('promptInput');
@@ -1254,6 +1348,14 @@ async function requestBackendChatReply(
           : "The MAS runtime is not installed yet, so I can fall back to the local setup flow.",
         intent: "action",
         recommended_action: fallbackAction,
+        summary: runtimeStatus.pythonExists
+          ? "The chat backend is offline, but MAS can still run the local action directly."
+          : "The MAS runtime still needs setup before the backend chat can work.",
+        files_in_focus: runtimeStatus.repoRoot ? [runtimeStatus.repoRoot] : [],
+        suggestions: runtimeStatus.pythonExists
+          ? ["Run the requested action, then retry the chat request."]
+          : ["Run setup first, then start the API."],
+        next_step: runtimeStatus.pythonExists ? "Run the local action now." : "Run setup, then start api.",
         follow_up_actions: [
           { action: fallbackAction, label: fallbackAction === "installRuntime" ? "setup" : "run" },
         ],
@@ -1399,12 +1501,13 @@ async function requestExternalLlmReply(
   const operatorContext = await buildOperatorContext(context, output, sidebar);
   const systemPrompt = [
     "You are the natural-language interface for MAS, a local software intelligence agent.",
-    "Your job is to convert plain English into one of the supported MAS actions when appropriate, otherwise answer briefly and clearly.",
-    "Supported actions: installRuntime, startApi, healthCheck, analyzeWorkspace, showLastTask, configureProvider.",
+    "Your job is to convert plain English into one of the supported MAS actions when appropriate, otherwise answer clearly like a helpful coding agent.",
+    "Supported actions: installRuntime, startApi, healthCheck, analyzeWorkspace, showLastTask, configureProvider, applyApprovedEdits.",
     "Return only JSON with this schema:",
-    '{"reply":"string","action":"installRuntime|startApi|healthCheck|analyzeWorkspace|showLastTask|configureProvider|null","highlights":["string"],"cards":[{"title":"string","body":"string","action":"string|null","action_label":"string|null"}],"follow_up_actions":[{"action":"string","label":"string"}]}',
+    '{"reply":"string","action":"installRuntime|startApi|healthCheck|analyzeWorkspace|showLastTask|configureProvider|applyApprovedEdits|null","summary":"string|null","actions_taken":["string"],"files_in_focus":["string"],"files_changed":["string"],"code_changes":["string"],"symbols_in_focus":["string"],"suggestions":["string"],"next_step":"string|null","highlights":["string"],"cards":[{"title":"string","body":"string","action":"string|null","action_label":"string|null"}],"follow_up_actions":[{"action":"string","label":"string"}]}',
     "Do not mention tenants, logins, or passwords. MAS is single-user and local.",
     "If the user asks to connect an LLM, configure a provider, set an API key, or change models, choose configureProvider.",
+    "When you can, fill summary, suggestions, and next_step so MAS feels like a real teammate.",
   ].join("\n");
   const userPrompt = `MAS context:\n${operatorContext}\n\nUser request:\n${prompt}`;
 
@@ -1415,6 +1518,14 @@ async function requestExternalLlmReply(
   const parsed = JSON.parse(extractJsonObject(rawReply)) as {
     reply?: string;
     action?: string | null;
+    summary?: string;
+    actions_taken?: string[];
+    files_in_focus?: string[];
+    files_changed?: string[];
+    code_changes?: string[];
+    symbols_in_focus?: string[];
+    suggestions?: string[];
+    next_step?: string;
     highlights?: string[];
     cards?: ChatCard[];
     follow_up_actions?: FollowUpAction[];
@@ -1425,6 +1536,14 @@ async function requestExternalLlmReply(
     intent: parsed.action ? "action" : "answer",
     recommended_action: parsed.action ?? undefined,
     source_task_id: context.globalState.get<string>("masi.lastTaskId") ?? undefined,
+    summary: parsed.summary ?? undefined,
+    actions_taken: parsed.actions_taken ?? [],
+    files_in_focus: parsed.files_in_focus ?? [],
+    files_changed: parsed.files_changed ?? [],
+    code_changes: parsed.code_changes ?? [],
+    symbols_in_focus: parsed.symbols_in_focus ?? [],
+    suggestions: parsed.suggestions ?? [],
+    next_step: parsed.next_step ?? undefined,
     highlights: parsed.highlights ?? [],
     cards: parsed.cards ?? [],
     follow_up_actions: parsed.follow_up_actions ?? [],
@@ -1437,6 +1556,16 @@ async function requestOperatorReply(
   output: vscode.OutputChannel,
   sidebar: MasiSidebarProvider,
 ): Promise<BackendChatResponse | undefined> {
+  try {
+    const backendReply = await requestBackendChatReply(prompt, context, output, sidebar);
+    if (backendReply) {
+      return backendReply;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    output.appendLine(`Backend chat request failed: ${message}`);
+  }
+
   try {
     const externalReply = await requestExternalLlmReply(prompt, context, output, sidebar);
     if (externalReply) {
@@ -1454,7 +1583,292 @@ async function requestOperatorReply(
       ],
     };
   }
-  return requestBackendChatReply(prompt, context, output, sidebar);
+  return undefined;
+}
+
+function extractPathCandidates(prompt: string): string[] {
+  const matches = prompt.match(/[A-Za-z0-9_./\\-]+\.[A-Za-z0-9_]+/g) ?? [];
+  const unique: string[] = [];
+  for (const match of matches) {
+    const normalized = match.replace(/^['"`]|['"`]$/g, "");
+    if (normalized && !unique.includes(normalized)) {
+      unique.push(normalized);
+    }
+  }
+  return unique;
+}
+
+function normalizeFocusPath(value: string): string {
+  return value.replace(/^[A-Z?]{1,2}\s+/, "").trim();
+}
+
+function resolveWorkspaceFileTargets(
+  prompt: string,
+  fallbackFiles: string[] = [],
+  limit = 1,
+): string[] {
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!workspaceRoot) {
+    return [];
+  }
+
+  const resolved: string[] = [];
+  const seen = new Set<string>();
+  const candidates = [
+    ...extractPathCandidates(prompt),
+    ...fallbackFiles.map(normalizeFocusPath),
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = candidate.replace(/\\/g, path.sep);
+    const absolute = path.isAbsolute(normalized)
+      ? normalized
+      : path.join(workspaceRoot, normalized);
+    if (fs.existsSync(absolute) && fs.statSync(absolute).isFile()) {
+      const finalPath = path.normalize(absolute);
+      if (!seen.has(finalPath)) {
+        seen.add(finalPath);
+        resolved.push(finalPath);
+      }
+    }
+    if (resolved.length >= limit) {
+      break;
+    }
+  }
+
+  return resolved;
+}
+
+async function requestEditableFileRewrite(
+  context: vscode.ExtensionContext,
+  filePath: string,
+  prompt: string,
+): Promise<{
+  updatedContent: string;
+  summary?: string;
+  validationSteps: string[];
+  changeNotes: string[];
+}> {
+  const provider = getAiProviderConfig(context);
+  const apiKey = await getAiProviderApiKey(context);
+  if (!provider || !apiKey) {
+    throw new Error("Connect an LLM first so MAS can generate the approved edit.");
+  }
+
+  const currentContent = fs.readFileSync(filePath, "utf8");
+  if (currentContent.length > 30000) {
+    throw new Error("That file is too large for the current in-editor edit flow. Pick a smaller file first.");
+  }
+
+  const relativePath = vscode.workspace.asRelativePath(filePath);
+  const systemPrompt = [
+    "You are MAS, a local coding agent applying an explicitly approved edit.",
+    "Return only JSON with this schema:",
+    '{"updated_content":"string","summary":"string","validation_steps":["string"],"change_notes":["string"]}',
+    "Preserve unrelated code. Make the smallest coherent change that satisfies the user request.",
+    "Do not wrap the content in markdown fences.",
+  ].join("\n");
+  const userPrompt = [
+    `Target file: ${relativePath}`,
+    `User request: ${prompt}`,
+    "Current file content:",
+    currentContent,
+  ].join("\n\n");
+
+  const rawReply = provider.providerId === "anthropic"
+    ? await requestAnthropicReply(apiKey, provider.model, systemPrompt, userPrompt)
+    : await requestOpenAiCompatibleReply(
+      provider.baseUrl ?? "https://api.openai.com/v1",
+      apiKey,
+      provider.model,
+      systemPrompt,
+      userPrompt,
+    );
+
+  const parsed = JSON.parse(extractJsonObject(rawReply)) as {
+    updated_content?: string;
+    summary?: string;
+    validation_steps?: string[];
+    change_notes?: string[];
+  };
+
+  if (!parsed.updated_content) {
+    throw new Error("The connected LLM did not return updated file content.");
+  }
+
+  return {
+    updatedContent: parsed.updated_content,
+    summary: parsed.summary,
+    validationSteps: parsed.validation_steps ?? [],
+    changeNotes: parsed.change_notes ?? [],
+  };
+}
+
+function runCommandCapture(
+  command: string,
+  args: string[],
+  cwd: string,
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { cwd }, (error, stdout, stderr) => {
+      if (error && typeof (error as { code?: number }).code !== "number") {
+        reject(error);
+        return;
+      }
+      resolve({
+        stdout: stdout.toString(),
+        stderr: stderr.toString(),
+        code: typeof (error as { code?: number } | null)?.code === "number"
+          ? Number((error as { code?: number }).code)
+          : 0,
+      });
+    });
+  });
+}
+
+function buildBeforeAfterSnippet(relativePath: string, before: string, after: string): string {
+  const beforeLines = before.split(/\r?\n/);
+  const afterLines = after.split(/\r?\n/);
+  let start = 0;
+  while (
+    start < beforeLines.length
+    && start < afterLines.length
+    && beforeLines[start] === afterLines[start]
+  ) {
+    start += 1;
+  }
+
+  let beforeEnd = beforeLines.length - 1;
+  let afterEnd = afterLines.length - 1;
+  while (
+    beforeEnd >= start
+    && afterEnd >= start
+    && beforeLines[beforeEnd] === afterLines[afterEnd]
+  ) {
+    beforeEnd -= 1;
+    afterEnd -= 1;
+  }
+
+  const beforeSlice = beforeLines.slice(Math.max(0, start - 1), Math.min(beforeLines.length, beforeEnd + 2));
+  const afterSlice = afterLines.slice(Math.max(0, start - 1), Math.min(afterLines.length, afterEnd + 2));
+  return [
+    relativePath,
+    "before:",
+    ...beforeSlice,
+    "after:",
+    ...afterSlice,
+  ].join("\n");
+}
+
+async function runTargetedValidation(
+  filePath: string,
+  output: vscode.OutputChannel,
+): Promise<string[]> {
+  const repoRoot = getConfig().repoRoot || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!repoRoot) {
+    return ["validation skipped: workspace root is not configured"];
+  }
+
+  const relativePath = vscode.workspace.asRelativePath(filePath);
+  const extensionRoot = path.join(repoRoot, "vscode-extension", "masi-assistant");
+  const pythonPath = getConfig().pythonPath;
+  const suffix = path.extname(filePath).toLowerCase();
+  const results: string[] = [];
+
+  if (suffix === ".py" && fs.existsSync(pythonPath)) {
+    const ruffResult = await runCommandCapture(pythonPath, ["-m", "ruff", "check", relativePath], repoRoot);
+    const label = ruffResult.code === 0 ? "validation passed" : "validation failed";
+    results.push(`${label}: ruff check ${relativePath}`);
+    if (ruffResult.code !== 0 && ruffResult.stderr.trim()) {
+      output.appendLine(ruffResult.stderr.trim());
+    }
+    return results;
+  }
+
+  if (
+    [".ts", ".tsx", ".js", ".jsx"].includes(suffix)
+    && filePath.includes(path.join("vscode-extension", "masi-assistant"))
+    && fs.existsSync(extensionRoot)
+  ) {
+    const npmExecutable = process.platform === "win32" ? "npm.cmd" : "npm";
+    const compileResult = await runCommandCapture(npmExecutable, ["run", "compile"], extensionRoot);
+    const label = compileResult.code === 0 ? "validation passed" : "validation failed";
+    results.push(`${label}: npm run compile`);
+    if (compileResult.code !== 0 && compileResult.stderr.trim()) {
+      output.appendLine(compileResult.stderr.trim());
+    }
+    return results;
+  }
+
+  return ["validation skipped: no targeted validator is configured for this file type"];
+}
+
+async function applyApprovedEditsForPrompt(
+  prompt: string,
+  context: vscode.ExtensionContext,
+  output: vscode.OutputChannel,
+  fallbackFiles: string[] = [],
+): Promise<AppliedEditResult> {
+  const targets = resolveWorkspaceFileTargets(prompt, fallbackFiles, 1);
+  if (targets.length === 0) {
+    throw new Error("Include a file path in your prompt, or ask MAS to inspect a file first.");
+  }
+
+  const target = targets[0];
+  output.appendLine(`Applying approved edits to ${target}`);
+  const currentContent = fs.readFileSync(target, "utf8");
+  const rewrite = await requestEditableFileRewrite(context, target, prompt);
+  const relativePath = vscode.workspace.asRelativePath(target);
+
+  if (rewrite.updatedContent === currentContent) {
+    return {
+      text: `The connected LLM reviewed ${relativePath}, but it did not propose any code changes.`,
+      summary: rewrite.summary ?? `No file changes were needed for ${relativePath}.`,
+      filesInFocus: [relativePath],
+      suggestions: ["Refine the instruction if you want a more specific edit."],
+      nextStep: "Adjust the prompt and try again if you still want a change.",
+    };
+  }
+
+  const approval = await vscode.window.showInformationMessage(
+    `Apply MAS edit to ${relativePath}?`,
+    { modal: true, detail: rewrite.summary ?? prompt },
+    "Apply",
+  );
+  if (approval !== "Apply") {
+    throw new Error("Edit canceled before writing to disk.");
+  }
+
+  const document = await vscode.workspace.openTextDocument(target);
+  const lastLine = document.lineAt(document.lineCount - 1);
+  const fullRange = new vscode.Range(0, 0, document.lineCount - 1, lastLine.text.length);
+  const edit = new vscode.WorkspaceEdit();
+  edit.replace(document.uri, fullRange, rewrite.updatedContent);
+  const applied = await vscode.workspace.applyEdit(edit);
+  if (!applied) {
+    throw new Error("VS Code could not apply the generated edit.");
+  }
+  await document.save();
+
+  const validationResults = await runTargetedValidation(target, output);
+  const diffSnippet = buildBeforeAfterSnippet(relativePath, currentContent, rewrite.updatedContent);
+  return {
+    text: `I applied the approved edit to ${relativePath} and saved the file.`,
+    summary: rewrite.summary ?? `Applied an approved edit to ${relativePath}.`,
+    actionsTaken: [
+      `rewrote ${relativePath} with the connected LLM`,
+      "saved the updated file to disk",
+    ],
+    filesInFocus: [relativePath],
+    filesChanged: [relativePath],
+    codeChanges: [diffSnippet, ...rewrite.changeNotes].slice(0, 4),
+    validationResults,
+    suggestions: [
+      "Review the diff to confirm the change matches your intent.",
+      "Run the smallest validation step before moving on.",
+    ],
+    nextStep: validationResults[0] ?? rewrite.validationSteps[0] ?? "Run the smallest relevant validation command.",
+  };
 }
 
 class MasiSidebarProvider implements vscode.WebviewViewProvider {
@@ -1623,6 +2037,11 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  public async showInlineResult(result: AppliedEditResult): Promise<void> {
+    await this.appendMessage("assistant", result.text, result);
+    await this.refresh();
+  }
+
   private async approveRepair(repairId: string): Promise<void> {
     try {
       await requestJson<JsonObject>("POST", `/api/v1/repairs/${repairId}/approve`);
@@ -1728,12 +2147,28 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
         }
         await this.appendMessage("assistant", smartReply.answer, {
           taskId: smartReply.source_task_id,
+          summary: smartReply.summary,
+          actionsTaken: smartReply.actions_taken ?? [],
+          filesInFocus: smartReply.files_in_focus ?? [],
+          filesChanged: smartReply.files_changed ?? [],
+          codeChanges: smartReply.code_changes ?? [],
+          symbolsInFocus: smartReply.symbols_in_focus ?? [],
+          suggestions: smartReply.suggestions ?? [],
+          nextStep: smartReply.next_step,
           cards: smartReply.cards ?? [],
           followUpActions: smartReply.follow_up_actions ?? [],
         });
         if (smartReply.intent === "action" && smartReply.recommended_action) {
           const action = smartReply.recommended_action as MasiAction;
-          if (action === "showLastTask") {
+          if (action === "applyApprovedEdits") {
+            const applied = await applyApprovedEditsForPrompt(
+              prompt,
+              this.context,
+              this.output,
+              smartReply.files_in_focus ?? [],
+            );
+            await this.appendMessage("assistant", applied.text, applied);
+          } else if (action === "showLastTask") {
             await vscode.commands.executeCommand(MAS_ACTIONS[action].command);
           } else if (action === "installRuntime" || action === "startApi" || action === "healthCheck" || action === "analyzeWorkspace" || action === "configureProvider") {
             await vscode.commands.executeCommand(MAS_ACTIONS[action].command);
@@ -1754,8 +2189,20 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
     if (!action || action === "showLastTask" || action === "refreshSidebar" || action === "openSidebar") {
       await this.appendMessage(
         "assistant",
-        "I can answer repo/status/task questions, or help with: install runtime, start API, run health check, analyze the current workspace, show the last task, or set up an AI provider.",
+        "I can answer repo/status/task questions, inspect files and symbols, plan edits, apply approved edits, or help with: install runtime, start API, run health check, analyze the current workspace, show the last task, or set up an AI provider.",
       );
+      await this.refresh();
+      return;
+    }
+
+    if (action === "applyApprovedEdits") {
+      try {
+        const applied = await applyApprovedEditsForPrompt(prompt, this.context, this.output);
+        await this.appendMessage("assistant", applied.text, applied);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await this.appendMessage("assistant", `I could not apply the approved edit yet: ${message}`);
+      }
       await this.refresh();
       return;
     }
@@ -1900,6 +2347,24 @@ class MasiPanel {
       return;
     }
 
+    if (action === "applyApprovedEdits") {
+      const prompt = await vscode.window.showInputBox({
+        prompt: "What edit should MAS apply?",
+        placeHolder: "Example: apply approved edits to src/runtime/chat.py and simplify the summary text",
+      });
+      if (!prompt) {
+        return;
+      }
+      try {
+        const applied = await applyApprovedEditsForPrompt(prompt, this.context, this.output);
+        await this.appendMessage("assistant", applied.text, applied);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await this.appendMessage("assistant", `I could not apply the approved edit yet: ${message}`);
+      }
+      return;
+    }
+
     await vscode.commands.executeCommand(item.command);
     await this.appendMessage("assistant", item.reply);
   }
@@ -1916,12 +2381,28 @@ class MasiPanel {
         }
         await this.appendMessage("assistant", smartReply.answer, {
           taskId: smartReply.source_task_id,
+          summary: smartReply.summary,
+          actionsTaken: smartReply.actions_taken ?? [],
+          filesInFocus: smartReply.files_in_focus ?? [],
+          filesChanged: smartReply.files_changed ?? [],
+          codeChanges: smartReply.code_changes ?? [],
+          symbolsInFocus: smartReply.symbols_in_focus ?? [],
+          suggestions: smartReply.suggestions ?? [],
+          nextStep: smartReply.next_step,
           cards: smartReply.cards ?? [],
           followUpActions: smartReply.follow_up_actions ?? [],
         });
         if (smartReply.intent === "action" && smartReply.recommended_action) {
           const action = smartReply.recommended_action as MasiAction;
-          if (MAS_ACTIONS[action]) {
+          if (action === "applyApprovedEdits") {
+            const applied = await applyApprovedEditsForPrompt(
+              prompt,
+              this.context,
+              this.output,
+              smartReply.files_in_focus ?? [],
+            );
+            await this.appendMessage("assistant", applied.text, applied);
+          } else if (MAS_ACTIONS[action]) {
             await vscode.commands.executeCommand(MAS_ACTIONS[action].command);
           }
         }
@@ -1942,7 +2423,7 @@ class MasiPanel {
 
     await this.appendMessage(
       "assistant",
-      "I can help with: install runtime, start API, run health check, analyze the current workspace, show the last task, open the sidebar, or set up an AI provider.",
+      "I can help with: inspect files and symbols, plan edits, apply approved edits, install runtime, start API, run health check, analyze the current workspace, show the last task, open the sidebar, or set up an AI provider.",
     );
   }
 }
@@ -2081,6 +2562,26 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand("masi.configureProvider", async () => {
       await configureAiProvider(context, output, sidebar);
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("masi.applyApprovedEdits", async () => {
+      const prompt = await vscode.window.showInputBox({
+        prompt: "What approved edit should MAS apply?",
+        placeHolder: "Example: apply approved edits to src/runtime/chat.py and tighten the status summary wording",
+      });
+      if (!prompt) {
+        return;
+      }
+      try {
+        const applied = await applyApprovedEditsForPrompt(prompt, context, output);
+        await sidebar.showInlineResult(applied);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        output.appendLine(`MAS apply-approved-edits failed: ${message}`);
+        void vscode.window.showErrorMessage(`MAS could not apply the approved edit: ${message}`);
+      }
     }),
   );
 

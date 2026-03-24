@@ -2,7 +2,7 @@
   "name": "mas-agent",
   "displayName": "MAS",
   "description": "Connect your LLM, chat in English, and control the MAS multi-agent system from VS Code.",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "publisher": "FundamentalLabs",
   "license": "SEE LICENSE IN LICENSE.txt",
   "icon": "media/mas-icon.png",
@@ -41,6 +41,7 @@
     "onCommand:masi.healthCheck",
     "onCommand:masi.analyzeWorkspace",
     "onCommand:masi.configureProvider",
+    "onCommand:masi.applyApprovedEdits",
     "onCommand:masi.showLastTask",
     "onCommand:masi.refreshSidebar"
   ],
@@ -70,6 +71,10 @@
       {
         "command": "masi.configureProvider",
         "title": "MAS: Connect To LLM"
+      },
+      {
+        "command": "masi.applyApprovedEdits",
+        "title": "MAS: Apply Approved Edits"
       },
       {
         "command": "masi.showLastTask",

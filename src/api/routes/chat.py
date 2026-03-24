@@ -34,6 +34,14 @@ class ChatResponse(BaseModel):
     intent: ChatIntent = ChatIntent.ANSWER
     recommended_action: str | None = None
     source_task_id: str | None = None
+    summary: str | None = None
+    actions_taken: list[str] = Field(default_factory=list)
+    files_in_focus: list[str] = Field(default_factory=list)
+    files_changed: list[str] = Field(default_factory=list)
+    code_changes: list[str] = Field(default_factory=list)
+    symbols_in_focus: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+    next_step: str | None = None
     highlights: list[str] = Field(default_factory=list)
     cards: list[dict[str, str | None]] = Field(default_factory=list)
     follow_up_actions: list[dict[str, str]] = Field(default_factory=list)
@@ -61,6 +69,14 @@ def chat(request: ChatRequest) -> ChatResponse:
         intent=ChatIntent(reply.intent),
         recommended_action=reply.recommended_action,
         source_task_id=reply.source_task_id,
+        summary=reply.summary,
+        actions_taken=reply.actions_taken,
+        files_in_focus=reply.files_in_focus,
+        files_changed=reply.files_changed,
+        code_changes=reply.code_changes,
+        symbols_in_focus=reply.symbols_in_focus,
+        suggestions=reply.suggestions,
+        next_step=reply.next_step,
         highlights=reply.highlights,
         cards=[
             {
