@@ -193,6 +193,72 @@ class RuntimeChatService:
         normalized_prompt: str,
         selected_task: RuntimeTask | None,
     ) -> RuntimeChatReply | None:
+        wants_project_read = (
+            any(
+                token in normalized_prompt
+                for token in {
+                    "read my entire project",
+                    "read the entire project",
+                    "read this project",
+                    "review my project",
+                    "review this project",
+                    "understand this project",
+                    "summarize this project",
+                    "summarize the project",
+                    "project summary",
+                    "repo summary",
+                    "repository summary",
+                    "codebase summary",
+                }
+            )
+            or (
+                any(
+                    token in normalized_prompt
+                    for token in {
+                        "read",
+                        "review",
+                        "understand",
+                        "summarize",
+                        "summary",
+                        "overview",
+                    }
+                )
+                and any(
+                    token in normalized_prompt
+                    for token in {"project", "repo", "repository", "workspace", "codebase"}
+                )
+            )
+        )
+        if wants_project_read and (
+            selected_task is None or selected_task.status.lower() != "completed"
+        ):
+            latest = (
+                f" The latest task I know about is {selected_task.task_id}"
+                f" and it is still {selected_task.status}."
+                if selected_task is not None
+                else ""
+            )
+            return RuntimeChatReply(
+                answer=(
+                    "To read the whole project and give you a meaningful summary, I"
+                    " should run a fresh workspace analysis first." + latest
+                ),
+                intent="action",
+                recommended_action="analyzeWorkspace",
+                source_task_id=selected_task.task_id if selected_task is not None else None,
+                summary=(
+                    "MAS needs a completed workspace analysis before it can produce"
+                    " a reliable whole-project summary."
+                ),
+                suggestions=[
+                    "Run analyze on the current workspace.",
+                    "After that, ask for a project summary or the top findings.",
+                ],
+                next_step="Run analyze, then ask MAS to summarize the project.",
+                follow_up_actions=[
+                    RuntimeChatAction(action="analyzeWorkspace", label="analyze"),
+                ],
+            )
         if "install" in normalized_prompt and (
             "runtime" in normalized_prompt or "setup" in normalized_prompt
         ):
@@ -454,6 +520,30 @@ class RuntimeChatService:
                 recommended_action="analyzeWorkspace",
                 summary="There is no analysis result to summarize yet.",
                 next_step="Run analyze, then ask for a summary again.",
+            )
+        if task.status.lower() != "completed":
+            return RuntimeChatReply(
+                answer=(
+                    f"The latest task {task.task_id} is still {task.status}, so I do"
+                    " not have a finished project summary yet."
+                ),
+                intent="action",
+                recommended_action="analyzeWorkspace",
+                source_task_id=task.task_id,
+                summary=(
+                    f"{task.task_id} is still {task.status}; MAS needs a completed"
+                    " analysis before the summary will be meaningful."
+                ),
+                files_in_focus=self._merge_focus_files(task, workspace_snapshot),
+                suggestions=[
+                    "Run analyze again to refresh the workspace task.",
+                    "After it completes, ask for the project summary.",
+                ],
+                next_step="Run analyze, then ask for the summary again.",
+                follow_up_actions=[
+                    RuntimeChatAction(action="analyzeWorkspace", label="analyze"),
+                    RuntimeChatAction(action="showLastTask", label="last task"),
+                ],
             )
 
         result = task.result or {}

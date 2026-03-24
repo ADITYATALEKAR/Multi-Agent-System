@@ -151,11 +151,9 @@ def submit_task(request: TaskSubmitRequest) -> TaskSubmitResponse:
     runtime = get_runtime()
     if request.task_type not in {"analysis", "repo_map"}:
         raise HTTPException(status_code=400, detail=f"Unsupported task type: {request.task_type}")
-    explicit_scheduler_fields = request.model_fields_set - {"task_type"}
-    if explicit_scheduler_fields:
-        task = runtime.enqueue_analysis(request.repo_path, tenant_id=request.tenant_id)
-    else:
-        task = runtime.submit_analysis(request.repo_path, tenant_id=request.tenant_id)
+    # Keep the local MAS API synchronous for now so the VS Code extension can
+    # immediately open a populated task report for the requested workspace path.
+    task = runtime.submit_analysis(request.repo_path, tenant_id=request.tenant_id)
 
     log.info(
         "task_submitted",

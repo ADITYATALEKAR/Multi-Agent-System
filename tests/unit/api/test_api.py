@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from src.api.app import create_app
 from src.api.auth import AuthMiddleware
 from src.api.middleware import RateLimiter
+from src.runtime.service import get_runtime
 
 # ---------------------------------------------------------------------------
 # Fixture
@@ -70,6 +71,17 @@ def test_get_task(client):
     assert len(body["work_items"]) >= 1
     assert "violations" in body
     assert "repairs" in body
+
+
+def test_submit_task_with_repo_path_completes_immediately(client):
+    """Task submission with an explicit repo path should still run inline."""
+    resp = client.post(
+        "/api/v1/tasks",
+        json={"task_type": "analysis", "repo_path": str(Path.cwd())},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["status"] == "completed"
 
 
 def test_list_tasks(client):
@@ -194,6 +206,24 @@ def test_chat_can_recommend_action(client):
     assert body["intent"] == "action"
     assert body["recommended_action"] == "analyzeWorkspace"
     assert body["follow_up_actions"][0]["action"] == "analyzeWorkspace"
+
+
+def test_chat_project_summary_request_recommends_analysis_when_latest_task_is_pending(client):
+    """Whole-project summary prompts should trigger analyze when the latest task is unfinished."""
+    pending = get_runtime().enqueue_analysis(str(Path.cwd()))
+    resp = client.post(
+        "/api/v1/chat",
+        json={
+            "prompt": "read my entire project and give me summary",
+            "task_id": pending.task_id,
+            "repo_path": str(Path.cwd()),
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["intent"] == "action"
+    assert body["recommended_action"] == "analyzeWorkspace"
+    assert "fresh workspace analysis" in body["answer"].lower()
 
 
 def test_chat_can_recommend_llm_connection(client):
