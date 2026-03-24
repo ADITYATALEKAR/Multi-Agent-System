@@ -368,6 +368,47 @@ class ChatHistoryStore {
     this.emit();
   }
 
+  public listThreads(): Array<{ taskId?: string; label: string; description: string }> {
+    const workspaceKey = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "global";
+    const prefix = `masi.chatHistory::${workspaceKey}::`;
+    const threads = new Map<string | undefined, { taskId?: string; label: string; description: string }>();
+
+    for (const key of this.context.workspaceState.keys()) {
+      if (!key.startsWith(prefix)) {
+        continue;
+      }
+      const suffix = key.slice(prefix.length);
+      const taskId = suffix === "general" ? undefined : suffix;
+      const messages = this.load(taskId);
+      const firstUserMessage = messages.find((message) => message.role === "user")?.text.trim() ?? "";
+      const description = firstUserMessage
+        ? truncateText(firstUserMessage.replace(/\s+/g, " "), 72)
+        : taskId
+          ? "Saved task chat"
+          : "Fresh workspace chat";
+      const label = taskId ?? "new chat";
+      threads.set(taskId, { taskId, label, description });
+    }
+
+    if (!threads.has(undefined)) {
+      threads.set(undefined, {
+        taskId: undefined,
+        label: "new chat",
+        description: "Fresh workspace chat",
+      });
+    }
+
+    return [...threads.values()].sort((left, right) => {
+      if (left.taskId === undefined) {
+        return -1;
+      }
+      if (right.taskId === undefined) {
+        return 1;
+      }
+      return right.label.localeCompare(left.label);
+    });
+  }
+
   public subscribe(listener: () => void): vscode.Disposable {
     this.listeners.add(listener);
     return new vscode.Disposable(() => {
@@ -394,6 +435,13 @@ class ChatHistoryStore {
 
 function getDefaultChatMessages(): PanelChatMessage[] {
   return [];
+}
+
+function truncateText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}...`;
 }
 
 type MasiAction =
@@ -570,11 +618,6 @@ function renderTaskSummary(task: TaskItem | undefined): string {
 
 function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string {
   const nonce = String(Date.now());
-  const setupParts = [
-    `repo ${state.runtimeStatus.repoRootExists ? 'ready' : 'unset'}`,
-    `runtime ${state.runtimeStatus.pythonExists ? 'ready' : 'missing'}`,
-    `api ${state.healthStatus}`,
-  ].join(' | ');
   const systemButtons = [
     ['installRuntime', 'setup'],
     ['startApi', 'start api'],
@@ -628,26 +671,26 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
       padding: 14px 20px 10px;
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      justify-content: flex-start;
       gap: 16px;
       border-bottom: 1px solid var(--border);
       background: var(--bg);
     }
-    .topbar-left, .topbar-right {
+    .topbar-left {
       display: flex;
       align-items: center;
       gap: 12px;
+    }
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: auto;
     }
     .brand {
       font-size: 18px;
       font-weight: 700;
       letter-spacing: 0.01em;
-    }
-    .topbar-meta {
-      color: var(--soft);
-      font-size: 12px;
-      text-align: right;
-      font-family: "Segoe UI", sans-serif;
     }
     .dashboard {
       display: flex;
@@ -888,6 +931,23 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
     .workspace-toggle.open .workspace-toggle-arrow {
       transform: rotate(90deg);
     }
+    .toolbar-button {
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.02);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 7px 12px;
+      cursor: pointer;
+      font-size: 12px;
+      font-family: "Segoe UI", sans-serif;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .toolbar-button:hover {
+      border-color: #ffffff;
+    }
     .composer {
       position: absolute;
       left: 0;
@@ -960,8 +1020,9 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
           <span class="workspace-toggle-arrow">▸</span>
         </button>
       </div>
-      <div class="topbar-right">
-        <div class="topbar-meta">${escapeHtml(setupParts)}</div>
+      <div class="topbar-actions">
+        <button class="toolbar-button" data-action="newChat">new chat</button>
+        <button class="toolbar-button" data-action="openChatHistory">old chats</button>
       </div>
     </div>
     <div class="dashboard hidden" id="workspacePanel">
@@ -1028,15 +1089,22 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
   </div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-    const state = vscode.getState() || { workspaceOpen: false };
+    const state = vscode.getState() || { workspaceOpen: false, promptDraft: '' };
     const workspacePanel = document.getElementById('workspacePanel');
     const workspaceToggle = document.getElementById('workspaceToggle');
+    const promptInput = document.getElementById('promptInput');
+    const sendPrompt = document.getElementById('sendPrompt');
+    const updateState = (patch) => {
+      Object.assign(state, patch);
+      vscode.setState(state);
+    };
     const setWorkspaceOpen = (isOpen) => {
       workspacePanel.classList.toggle('hidden', !isOpen);
       workspaceToggle.classList.toggle('open', isOpen);
-      vscode.setState({ workspaceOpen: isOpen });
+      updateState({ workspaceOpen: isOpen });
     };
     setWorkspaceOpen(Boolean(state.workspaceOpen));
+    promptInput.value = String(state.promptDraft || '');
     workspaceToggle.addEventListener('click', () => {
       setWorkspaceOpen(workspacePanel.classList.contains('hidden'));
     });
@@ -1045,8 +1113,6 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
         vscode.postMessage({ type: element.getAttribute('data-action') });
       });
     });
-    const promptInput = document.getElementById('promptInput');
-    const sendPrompt = document.getElementById('sendPrompt');
     const submitPrompt = () => {
       const text = promptInput.value.trim();
       if (!text) {
@@ -1054,8 +1120,12 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
       }
       vscode.postMessage({ type: 'prompt', text });
       promptInput.value = '';
+      updateState({ promptDraft: '' });
     };
     sendPrompt.addEventListener('click', submitPrompt);
+    promptInput.addEventListener('input', () => {
+      updateState({ promptDraft: promptInput.value });
+    });
     promptInput.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
@@ -1369,10 +1439,15 @@ async function requestBackendChatReply(
     };
   }
 
+  const taskId = sidebar.getActiveTaskId() ?? context.globalState.get<string>("masi.lastTaskId") ?? "";
+  const repoPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
+  output.appendLine(
+    `POST /api/v1/chat task_id=${taskId || "(none)"} repo_path=${repoPath || "(none)"}`,
+  );
   return requestJson<BackendChatResponse>("POST", "/api/v1/chat", {
     prompt,
-    task_id: context.globalState.get<string>("masi.lastTaskId") ?? "",
-    repo_path: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "",
+    task_id: taskId,
+    repo_path: repoPath,
     provider: provider?.providerId ?? "",
     model: provider?.model ?? "",
   });
@@ -1906,6 +1981,10 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
         if (text) {
           await this.handlePrompt(text);
         }
+      } else if (type === "newChat") {
+        await this.startNewChat();
+      } else if (type === "openChatHistory") {
+        await this.openChatHistory();
       } else if (type in MAS_ACTIONS) {
         const action = type as MasiAction;
         if (action === "installRuntime" || action === "startApi" || action === "healthCheck" || action === "analyzeWorkspace") {
@@ -1950,6 +2029,10 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
 
     this.startPolling();
     void this.refresh();
+  }
+
+  public getActiveTaskId(): string | undefined {
+    return this.selectedTaskId;
   }
 
   public async refresh(): Promise<void> {
@@ -2039,6 +2122,31 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
 
   public async showInlineResult(result: AppliedEditResult): Promise<void> {
     await this.appendMessage("assistant", result.text, result);
+    await this.refresh();
+  }
+
+  public async startNewChat(): Promise<void> {
+    await this.setActiveTask(undefined);
+    this.messages = getDefaultChatMessages();
+    await this.persistMessages();
+    this.output.appendLine("MAS chat reset to a fresh workspace conversation.");
+    await this.refresh();
+  }
+
+  public async openChatHistory(): Promise<void> {
+    const options = this.history.listThreads().map((thread) => ({
+      label: thread.label,
+      description: thread.description,
+      taskId: thread.taskId,
+    }));
+    const picked = await vscode.window.showQuickPick(options, {
+      placeHolder: "Choose a MAS chat thread",
+      title: "MAS Old Chats",
+    });
+    if (!picked) {
+      return;
+    }
+    await this.setActiveTask(picked.taskId);
     await this.refresh();
   }
 
@@ -2341,6 +2449,14 @@ class MasiPanel {
   }
 
   private async handleAction(action: string): Promise<void> {
+    if (action === "newChat") {
+      await this.sidebar.startNewChat();
+      return;
+    }
+    if (action === "openChatHistory") {
+      await this.sidebar.openChatHistory();
+      return;
+    }
     const item = MAS_ACTIONS[action as MasiAction];
     if (!item) {
       await this.appendMessage("assistant", "I do not recognize that MAS action yet.");
@@ -2451,7 +2567,8 @@ async function runAnalyzeWorkspace(
       return;
     }
 
-    const submit = await requestJson<{ task_id: string }>("POST", "/api/v1/tasks", {
+    output.appendLine(`POST /api/v1/tasks repo_path=${folder.uri.fsPath}`);
+    const submit = await requestJson<{ task_id: string; status?: string }>("POST", "/api/v1/tasks", {
       task_type: "analysis",
       repo_path: folder.uri.fsPath,
       tenant_id: "default",
@@ -2459,7 +2576,7 @@ async function runAnalyzeWorkspace(
     await context.globalState.update("masi.lastTaskId", submit.task_id);
     await sidebar.showTask(submit.task_id);
     await sidebar.refresh();
-    output.appendLine(`Analysis complete for task ${submit.task_id}`);
+    output.appendLine(`Analysis complete for task ${submit.task_id} (${submit.status ?? "unknown"})`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     output.appendLine(`Analysis failed: ${message}`);
