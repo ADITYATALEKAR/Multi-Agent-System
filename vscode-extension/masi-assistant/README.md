@@ -1,43 +1,58 @@
 # MAS
 
-This extension installs and connects VS Code to the MAS multi-agent runtime.
+MAS brings your local multi-agent software intelligence system into VS Code.
 
 ## What It Does
 
-MAS adds a dedicated activity bar view for your multi-agent system so users can:
+MAS gives you:
 
-- install the MAS runtime from inside VS Code
-- start the local MAS API
-- run analysis for the current workspace
-- inspect recent tasks, violations, repairs, and hypotheses
+- a chat-first workspace inside VS Code
+- one-click local runtime setup
+- one-click API start and health checks
+- repository analysis for the open workspace
+- LLM connection with your own API key
+
+The goal is simple:
+
+`connect llm -> type in english -> MAS handles the rest`
+
+## Core Flow
+
+1. Open the `MAS` activity bar icon
+2. Click `connect llm`
+3. Choose your provider and paste your API key
+4. Click `setup` if the local runtime is not ready
+5. Click `start api`
+6. Ask MAS what you want in English
+
+Examples:
+
+- `connect to ChatGPT and use gpt-4.1`
+- `start the api and check health`
+- `analyze this workspace`
+- `summarize the latest task`
+
+## Supported Providers
+
+- ChatGPT / OpenAI
+- Claude / Anthropic
+- DeepSeek
+- Kimi / Moonshot
+- OpenRouter
+- Other OpenAI-compatible APIs
+
+API keys are stored in VS Code secret storage.
 
 ## Commands
 
-- `MAS: Install Runtime`
 - `MAS: Open Panel`
+- `MAS: Install Runtime`
 - `MAS: Start API`
 - `MAS: Health Check`
 - `MAS: Analyze Current Workspace`
+- `MAS: Connect To LLM`
 - `MAS: Show Last Task`
 - `MAS: Refresh Sidebar`
-
-## Sidebar
-
-Open the `MAS` activity bar icon to access the control panel sidebar. It shows:
-
-- API health
-- one-click runtime actions
-- recent MAS tasks with clickable summaries
-
-Open `MAS: Open Panel` to launch the full editor-style MAS workspace with a chat-like prompt, quick actions, and natural command routing.
-
-## Expected workflow
-
-1. Run `MAS: Install Runtime` once.
-2. Open the target workspace in VS Code.
-3. Run `MAS: Start API`.
-4. Run `MAS: Analyze Current Workspace`.
-5. Review the generated task summary document.
 
 ## Configuration
 
@@ -45,6 +60,36 @@ Open `MAS: Open Panel` to launch the full editor-style MAS workspace with a chat
 - `masi.repoRoot`
 - `masi.pythonPath`
 
-## Publish Notes
+Usually you can leave these alone and let MAS auto-detect the repo.
 
-The Marketplace package now points to the public MAS source repository and issue tracker. Use `PUBLISHING.md` if you need to publish a new version or rotate publisher credentials later.
+## Best Use Case
+
+MAS works best when you want to:
+
+- inspect a codebase locally
+- analyze architecture and violations
+- use natural language to drive local agent workflows
+- connect your own LLM instead of using a built-in hosted account system
+
+## Local Runtime
+
+If you are developing MAS locally, install the runtime from the repo root:
+
+```powershell
+.\run_full_system.ps1 -TargetPath "C:\path\to\target\repo"
+```
+
+Or manually:
+
+```powershell
+docker compose up -d
+py -3.12 -m venv .venv312
+.\.venv312\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv312\Scripts\python.exe -m uvicorn src.api.app:create_app --factory --host 127.0.0.1 --port 8000
+```
+
+## Publishing
+
+Marketplace publishing notes are in:
+
+- `PUBLISHING.md`

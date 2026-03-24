@@ -1,50 +1,76 @@
-# Publishing MAS
+# Publishing MAS 0.0.6
 
-## Before You Publish
+## Current Metadata
 
-Update these fields in [package.json](./package.json):
+The extension is already configured with:
 
-- `publisher`: replace `aditya-local` with your real Marketplace publisher ID
-- `repository`: add your public Git repository URL
-- `homepage`: add your product or documentation URL
-- `bugs.url`: add your issue tracker URL
+- `publisher`: `FundamentalLabs`
+- `name`: `mas-agent`
+- version: `0.0.6`
+- source repo: `https://github.com/ADITYATALEKAR/Multi-Agent-System.git`
 
-Recommended example:
+That means the current Marketplace identifier is:
 
-```json
-"publisher": "your-publisher-id",
-"repository": {
-  "type": "git",
-  "url": "https://github.com/your-org/mas-agent.git"
-},
-"homepage": "https://github.com/your-org/mas-agent#readme",
-"bugs": {
-  "url": "https://github.com/your-org/mas-agent/issues"
-}
-```
+`FundamentalLabs.mas-agent`
 
-## Marketplace Steps
+## Package The Extension
 
-1. Create an Azure DevOps organization if you do not already have one.
-2. Create a Personal Access Token with the Marketplace `Manage` scope.
-3. Create a publisher in Visual Studio Marketplace.
-4. Log in locally with `npx vsce login <your-publisher-id>`.
-5. Update `package.json` with that same publisher ID.
-6. Package with `npx vsce package`.
-7. Publish with `npx vsce publish` or upload the generated VSIX in the Marketplace publisher portal.
-
-## Local Checks
-
-Run these commands from the extension folder before publishing:
+From `vscode-extension/masi-assistant`:
 
 ```powershell
-npm install
-npm run compile
-npx vsce package
+npm.cmd run compile
+npx.cmd vsce package
 ```
+
+This creates:
+
+```text
+mas-agent-0.0.6.vsix
+```
+
+## Publish To Marketplace
+
+If your PAT is already valid:
+
+```powershell
+npx.cmd vsce publish
+```
+
+If you need to refresh login first:
+
+```powershell
+npx.cmd vsce login FundamentalLabs
+npx.cmd vsce publish
+```
+
+## PAT Requirements
+
+Create a Personal Access Token with:
+
+- `Organization`: `All accessible organizations`
+- `Scope`: `Marketplace -> Manage`
+
+If publish fails with an authorization error, the token is usually expired, tied to the wrong org, or missing the Marketplace `Manage` scope.
+
+## Manual Upload Option
+
+If CLI publishing is inconvenient, you can upload the VSIX manually in the Visual Studio Marketplace publisher portal.
+
+Upload:
+
+- `mas-agent-0.0.6.vsix`
+
+## Pre-publish Checklist
+
+Before publishing:
+
+1. `npm.cmd run compile`
+2. confirm `README.md` is public-friendly
+3. confirm `CHANGELOG.md` mentions the latest version
+4. confirm no local secrets or screenshots with personal data are included
 
 ## Notes
 
-- The extension icon used for Marketplace publication must be a PNG, not an SVG.
-- `README.md` and `CHANGELOG.md` should use HTTPS image URLs if you later add screenshots.
-- `vscode:prepublish` already compiles the extension automatically during packaging.
+- `vscode:prepublish` already compiles automatically during packaging
+- the Marketplace listing icon is the PNG file in `media/mas-icon.png`
+- API keys are not packaged because MAS stores them in VS Code secret storage, not in the repo

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.6
+
+- Added `Connect To LLM` so users can plug MAS into OpenAI, Anthropic, DeepSeek, Kimi, OpenRouter, or another OpenAI-compatible API.
+- Added a simpler plain-English operator flow: connect an LLM, type what you want, and let MAS translate it into local actions.
+- Improved the MAS chat workspace with a cleaner full-width layout, compact control strip, and better welcome/empty state.
+- Fixed local Windows API startup behavior in the extension.
+
 ## 0.0.2
 
 - Fixed the MAS sidebar contribution to register as a real webview.

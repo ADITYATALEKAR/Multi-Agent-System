@@ -1,7 +1,7 @@
 {
   "name": "mas-agent",
   "displayName": "MAS",
-  "description": "Install and control the MAS multi-agent system from VS Code.",
+  "description": "Connect your LLM, chat in English, and control the MAS multi-agent system from VS Code.",
   "version": "0.0.6",
   "publisher": "FundamentalLabs",
   "license": "SEE LICENSE IN LICENSE.txt",
@@ -19,6 +19,7 @@
   "keywords": [
     "multi-agent",
     "ai",
+    "llm",
     "software-analysis",
     "architecture",
     "developer-tools"
