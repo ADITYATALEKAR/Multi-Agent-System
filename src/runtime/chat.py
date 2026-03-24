@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from src.runtime.service import MASIRuntime, RuntimeTask, RuntimeWorkItem
+    from src.runtime.service import MASIRuntime, RuntimeTask, RuntimeViolation, RuntimeWorkItem
 
 
 @dataclass(slots=True)
@@ -96,6 +96,9 @@ class RuntimeChatService:
         action_reply = self._detect_action_intent(normalized, selected_task)
         if action_reply is not None:
             return action_reply
+
+        if self._is_project_summary_prompt(normalized):
+            return self._answer_project_summary(selected_task, workspace_snapshot)
 
         if "health" in normalized or "status" in normalized:
             return self._answer_status(recent_tasks, workspace_snapshot)
@@ -548,7 +551,7 @@ class RuntimeChatService:
 
         result = task.result or {}
         repo_summary = result.get("repo_summary", {})
-        explanation = str(result.get("explanation", "")).strip()
+        explanation = self._clean_explanation(result.get("explanation", ""))
         files_scanned = repo_summary.get("files_scanned", "unknown")
         directories_scanned = repo_summary.get("directories_scanned", "unknown")
         answer = (
@@ -558,6 +561,9 @@ class RuntimeChatService:
             f"violations, generated {len(task.hypotheses)} hypotheses, "
             f"and proposed {len(task.repairs)} repairs."
         )
+        finding_digest = self._finding_digest(task)
+        if finding_digest:
+            answer += f" Top findings: {finding_digest}"
         if explanation:
             answer += f" Explanation: {explanation}"
         return RuntimeChatReply(
@@ -570,8 +576,6 @@ class RuntimeChatService:
             ),
             actions_taken=[self._format_work_item_line(item) for item in task.work_items[:5]],
             files_in_focus=self._merge_focus_files(task, workspace_snapshot),
-            files_changed=workspace_snapshot.files_changed,
-            code_changes=workspace_snapshot.code_changes,
             suggestions=[
                 "Ask for top violations if you want the main risks.",
                 "Ask for repairs if you want the proposed fixes.",
@@ -595,6 +599,7 @@ class RuntimeChatService:
                         f"{len(task.repairs)} repairs"
                     ),
                 ),
+                *self._top_finding_cards(task),
                 RuntimeChatCard(
                     title="repo:",
                     body=task.repo_path,
@@ -604,6 +609,85 @@ class RuntimeChatService:
             ],
             follow_up_actions=[
                 RuntimeChatAction(action="showLastTask", label="report"),
+                RuntimeChatAction(action="analyzeWorkspace", label="reanalyze"),
+            ],
+        )
+
+    def _answer_project_summary(
+        self,
+        task: RuntimeTask | None,
+        workspace_snapshot: WorkspaceSnapshot,
+    ) -> RuntimeChatReply:
+        if task is None or task.status.lower() != "completed":
+            return RuntimeChatReply(
+                answer=(
+                    "I need a completed workspace analysis before I can explain the"
+                    " whole project in a useful way."
+                ),
+                intent="action",
+                recommended_action="analyzeWorkspace",
+                source_task_id=task.task_id if task is not None else None,
+                summary="MAS needs a fresh completed analysis to produce a repo-level summary.",
+                suggestions=[
+                    "Run analyze on the current workspace.",
+                    "Then ask again for the full project summary.",
+                ],
+                next_step="Run analyze, then ask MAS to summarize the whole project.",
+                follow_up_actions=[
+                    RuntimeChatAction(action="analyzeWorkspace", label="analyze"),
+                ],
+            )
+
+        result = task.result or {}
+        repo_summary = result.get("repo_summary", {})
+        repo_root = Path(task.repo_path)
+        project_blurb = self._project_blurb(repo_root)
+        layout = self._top_level_layout(repo_root)
+        language_mix = self._language_mix(repo_summary)
+        findings = self._findings_summary(task)
+        explanation = self._clean_explanation(result.get("explanation", ""))
+        files_scanned = repo_summary.get("files_scanned", "unknown")
+        directories_scanned = repo_summary.get("directories_scanned", "unknown")
+
+        answer_parts = [
+            project_blurb,
+            f"MAS scanned {files_scanned} files across {directories_scanned} directories.",
+            findings,
+        ]
+        if layout:
+            answer_parts.insert(1, f"The repo is organized around {layout}.")
+        if language_mix:
+            answer_parts.insert(2 if layout else 1, f"The codebase is mostly {language_mix}.")
+        if explanation:
+            answer_parts.append(f"Pipeline note: {explanation}")
+
+        return RuntimeChatReply(
+            answer=" ".join(part for part in answer_parts if part),
+            source_task_id=task.task_id,
+            summary=f"{task.task_id} project summary for {task.repo_path}",
+            actions_taken=[self._format_work_item_line(item) for item in task.work_items[:5]],
+            files_in_focus=self._project_focus_files(repo_root),
+            suggestions=[
+                "Ask for changes if you want the current workspace diff.",
+                "Ask for violations, repairs, or hypotheses if you want the analysis slices.",
+                "Ask MAS to explain a specific folder or file next.",
+            ],
+            next_step="Pick one area to drill into: architecture, changes, or a specific file.",
+            cards=[
+                RuntimeChatCard(title="project:", body=project_blurb),
+                RuntimeChatCard(
+                    title="architecture:",
+                    body=layout or "No clear top-level layout detected yet.",
+                ),
+                RuntimeChatCard(
+                    title="tech stack:",
+                    body=language_mix or "Language mix not available yet.",
+                ),
+                RuntimeChatCard(title="findings:", body=findings),
+                *self._top_finding_cards(task),
+            ],
+            follow_up_actions=[
+                RuntimeChatAction(action="showLastTask", label="open task"),
                 RuntimeChatAction(action="analyzeWorkspace", label="reanalyze"),
             ],
         )
@@ -630,23 +714,18 @@ class RuntimeChatService:
         counts: dict[str, int] = {}
         for violation in task.violations:
             counts[violation.severity] = counts.get(violation.severity, 0) + 1
-        top_lines = [
-            (
-                f"[{item.severity}] {item.rule} @ {item.file_path or '(no file path)'}"
-                f" -- {self._truncate(item.message or 'No message.', 120)}"
-            )
-            for item in task.violations[:3]
-        ]
+        top_violations = self._top_violations(task)
+        top_lines = [self._humanize_violation(item) for item in top_violations]
         severity_summary = ", ".join(f"{level}={count}" for level, count in sorted(counts.items()))
         return RuntimeChatReply(
             answer=(
-                f"Task {task.task_id} has {len(task.violations)} violations ({severity_summary})."
-                f" Top items:\n- " + "\n- ".join(top_lines)
+                f"Task {task.task_id} found {len(task.violations)} issues ({severity_summary})."
+                " The most important findings are:\n- "
+                + "\n- ".join(top_lines)
             ),
             source_task_id=task.task_id,
             summary=(
-                f"{task.task_id} has {len(task.violations)} violations across"
-                f" {severity_summary}."
+                f"{task.task_id} found {len(task.violations)} issues across {severity_summary}."
             ),
             actions_taken=[self._format_work_item_line(item) for item in task.work_items[:4]],
             files_in_focus=self._merge_focus_files(task, workspace_snapshot),
@@ -659,7 +738,7 @@ class RuntimeChatService:
             next_step="Review the top violation files, then ask for repairs or hypotheses.",
             cards=[
                 RuntimeChatCard(
-                    title="violations:",
+                    title="finding:",
                     body=line,
                     action="showLastTask",
                     action_label="open task",
@@ -1091,20 +1170,167 @@ class RuntimeChatService:
         task_id: str | None,
         repo_path: str | None,
     ) -> RuntimeTask | None:
+        normalized_repo_path = None
+        if repo_path:
+            try:
+                normalized_repo_path = str(Path(repo_path).expanduser().resolve())
+            except OSError:
+                normalized_repo_path = repo_path
+
         if task_id:
             task = self._runtime.get_task(task_id)
-            if task is not None and task.tenant_id == tenant_id:
+            if (
+                task is not None
+                and task.tenant_id == tenant_id
+                and (
+                    normalized_repo_path is None
+                    or task.repo_path == normalized_repo_path
+                )
+            ):
                 return task
 
         recent_tasks = self._recent_tasks(tenant_id=tenant_id, limit=20)
-        if repo_path:
+        if normalized_repo_path:
             for task in recent_tasks:
-                if task.repo_path == repo_path:
+                if task.repo_path == normalized_repo_path:
                     return task
+            return None
         return recent_tasks[0] if recent_tasks else None
 
+    @staticmethod
+    def _is_project_summary_prompt(normalized_prompt: str) -> bool:
+        direct_phrases = {
+            "read entire project",
+            "read my entire project",
+            "read the entire project",
+            "read this project",
+            "whole project",
+            "entire repo",
+            "entire repository",
+            "entire codebase",
+            "project summary",
+            "repo summary",
+            "repository summary",
+            "codebase summary",
+            "what does this project do",
+            "what is this project",
+            "understand this project",
+            "understand this repo",
+        }
+        if any(phrase in normalized_prompt for phrase in direct_phrases):
+            return True
+        summary_terms = {"summary", "summarize", "overview", "explain", "read", "understand"}
+        repo_terms = {"project", "repo", "repository", "workspace", "codebase"}
+        return any(token in normalized_prompt for token in summary_terms) and any(
+            token in normalized_prompt for token in repo_terms
+        )
+
+    @staticmethod
+    def _clean_explanation(value: object) -> str:
+        explanation = str(value or "").strip()
+        if explanation.startswith("Task: explain; Context keys:"):
+            return ""
+        return explanation
+
+    @staticmethod
+    def _project_focus_files(repo_root: Path, limit: int = 6) -> list[str]:
+        candidates = [
+            "README.md",
+            "pyproject.toml",
+            "Cargo.toml",
+            "docker-compose.yml",
+            "run_full_system.ps1",
+            "vscode-extension/masi-assistant/package.json",
+        ]
+        focus: list[str] = []
+        for relative in candidates:
+            if (repo_root / relative).exists():
+                focus.append(relative)
+            if len(focus) >= limit:
+                break
+        return focus
+
+    def _project_blurb(self, repo_root: Path) -> str:
+        readme = repo_root / "README.md"
+        if readme.exists():
+            try:
+                lines = [
+                    line.strip()
+                    for line in readme.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+            except (OSError, UnicodeDecodeError):
+                lines = []
+            for line in lines[:12]:
+                if line.startswith("#"):
+                    continue
+                if len(line) > 40:
+                    return self._truncate(line, 220)
+        repo_name = repo_root.name.replace("_", " ")
+        return (
+            f"{repo_name} is a multi-agent software intelligence workspace with"
+            " runtime, API, analysis, and VS Code integration pieces."
+        )
+
+    @staticmethod
+    def _top_level_layout(repo_root: Path) -> str:
+        labels = {
+            "src": "core runtime and analysis logic in `src/`",
+            "tests": "test coverage in `tests/`",
+            "rust": "Rust crates and accelerators in `rust/`",
+            "vscode-extension": "editor integration in `vscode-extension/`",
+            "docs": "project docs and plans in `docs/`",
+            "scripts": "support scripts in `scripts/`",
+            "infra": "deployment assets in `infra/`",
+        }
+        parts = [description for name, description in labels.items() if (repo_root / name).exists()]
+        return ", ".join(parts[:5])
+
+    @staticmethod
+    def _language_mix(repo_summary: dict[str, object]) -> str:
+        top_extensions = repo_summary.get("top_extensions", [])
+        if not isinstance(top_extensions, list):
+            return ""
+        pretty_names = {
+            ".py": "Python",
+            ".rs": "Rust",
+            ".ts": "TypeScript",
+            ".tsx": "TSX",
+            ".js": "JavaScript",
+            ".json": "JSON",
+            ".md": "Markdown",
+            ".ps1": "PowerShell",
+            ".yml": "YAML",
+            ".yaml": "YAML",
+        }
+        parts: list[str] = []
+        for item in top_extensions:
+            if not isinstance(item, dict):
+                continue
+            ext = str(item.get("extension", "")).lower()
+            count = item.get("count")
+            if ext in {"<no_ext>", ".pyd", ".typed", ".exe", ".txt"}:
+                continue
+            label = pretty_names.get(ext, ext.lstrip(".").upper() or ext)
+            parts.append(f"{label} ({count})")
+            if len(parts) >= 4:
+                break
+        return ", ".join(parts)
+
+    @staticmethod
+    def _findings_summary(task: RuntimeTask) -> str:
+        if task.violations or task.hypotheses or task.repairs:
+            return (
+                f"MAS found {len(task.violations)} violations,"
+                f" {len(task.hypotheses)} hypotheses, and {len(task.repairs)} repair candidates."
+            )
+        return (
+            "The current run did not surface violations, hypotheses, or repair candidates,"
+            " so MAS sees the repo as structurally quiet right now."
+        )
+
     def _summarize_task(self, task: RuntimeTask) -> str:
-        explanation = str(task.result.get("explanation", "")).strip()
+        explanation = self._clean_explanation(task.result.get("explanation", ""))
         summary = (
             f"{task.task_id} is {task.status} for {task.repo_path} | "
             f"{len(task.violations)} violations | {len(task.hypotheses)} "
@@ -1113,6 +1339,47 @@ class RuntimeChatService:
         if explanation:
             summary += f" | summary: {self._truncate(explanation, 140)}"
         return summary
+
+    def _finding_digest(self, task: RuntimeTask, limit: int = 3) -> str:
+        top_findings = [
+            self._humanize_violation(item) for item in self._top_violations(task, limit)
+        ]
+        return "; ".join(top_findings)
+
+    def _top_finding_cards(self, task: RuntimeTask, limit: int = 3) -> list[RuntimeChatCard]:
+        cards: list[RuntimeChatCard] = []
+        for item in self._top_violations(task, limit):
+            cards.append(
+                RuntimeChatCard(
+                    title="top finding:",
+                    body=self._humanize_violation(item),
+                    action="showLastTask",
+                    action_label="open task",
+                )
+            )
+        return cards
+
+    def _top_violations(self, task: RuntimeTask, limit: int = 3) -> list[RuntimeViolation]:
+        return sorted(
+            task.violations,
+            key=lambda item: (-self._severity_rank(item.severity), item.rule, item.file_path),
+        )[:limit]
+
+    def _humanize_violation(self, violation: RuntimeViolation) -> str:
+        location = Path(violation.file_path).name if violation.file_path else ""
+        message = self._truncate(violation.message or violation.rule.replace(".", " "), 140)
+        if location and location not in {".", ""}:
+            return f"{message} Location: {location}."
+        return message
+
+    @staticmethod
+    def _severity_rank(severity: str) -> int:
+        return {
+            "critical": 4,
+            "high": 3,
+            "medium": 2,
+            "low": 1,
+        }.get(severity.lower(), 0)
 
     def _collect_file_paths(self, task: RuntimeTask | None, limit: int = 5) -> list[str]:
         if task is None:

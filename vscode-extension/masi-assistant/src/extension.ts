@@ -347,6 +347,7 @@ async function configureAiProvider(
 
 class ChatHistoryStore {
   private readonly listeners = new Set<() => void>();
+  private static readonly generalThreadToken = "__general__";
 
   public constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -359,12 +360,29 @@ class ChatHistoryStore {
     this.emit();
   }
 
+  public async deleteThread(taskId?: string): Promise<void> {
+    await this.context.workspaceState.update(this.getThreadKey(taskId), undefined);
+    if (this.getActiveTaskId() === taskId || (taskId === undefined && !this.getActiveTaskId())) {
+      await this.setActiveTaskId(undefined);
+    } else {
+      this.emit();
+    }
+  }
+
   public getActiveTaskId(): string | undefined {
-    return this.context.workspaceState.get<string>(this.getActiveTaskKey());
+    const value = this.context.workspaceState.get<string>(this.getActiveTaskKey());
+    return value === ChatHistoryStore.generalThreadToken ? undefined : value;
+  }
+
+  public hasActiveSelection(): boolean {
+    return this.context.workspaceState.get<string>(this.getActiveTaskKey()) !== undefined;
   }
 
   public async setActiveTaskId(taskId?: string): Promise<void> {
-    await this.context.workspaceState.update(this.getActiveTaskKey(), taskId);
+    await this.context.workspaceState.update(
+      this.getActiveTaskKey(),
+      taskId ?? ChatHistoryStore.generalThreadToken,
+    );
     this.emit();
   }
 
@@ -1023,6 +1041,7 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
       <div class="topbar-actions">
         <button class="toolbar-button" data-action="newChat">new chat</button>
         <button class="toolbar-button" data-action="openChatHistory">old chats</button>
+        <button class="toolbar-button" data-action="deleteChatHistory">delete chats</button>
       </div>
     </div>
     <div class="dashboard hidden" id="workspacePanel">
@@ -1625,6 +1644,108 @@ async function requestExternalLlmReply(
   };
 }
 
+function isHighLevelSummaryPrompt(prompt: string): boolean {
+  const normalized = prompt.toLowerCase().trim();
+  const directPhrases = [
+    "read entire project",
+    "read my entire project",
+    "read the entire project",
+    "whole project",
+    "project summary",
+    "repo summary",
+    "repository summary",
+    "codebase summary",
+    "give me summary",
+    "summarize this",
+    "summarize the project",
+    "what does this project do",
+    "understand this repo",
+    "understand this project",
+  ];
+  if (directPhrases.some((phrase) => normalized.includes(phrase))) {
+    return true;
+  }
+  const summaryWords = ["summary", "summarize", "overview", "explain", "read", "understand"];
+  return summaryWords.some((word) => normalized.includes(word));
+}
+
+async function requestExternalSummaryRewrite(
+  prompt: string,
+  backendReply: BackendChatResponse,
+  context: vscode.ExtensionContext,
+  output: vscode.OutputChannel,
+  sidebar: MasiSidebarProvider,
+): Promise<BackendChatResponse | undefined> {
+  const provider = getAiProviderConfig(context);
+  const apiKey = await getAiProviderApiKey(context);
+  if (!provider || !apiKey) {
+    return undefined;
+  }
+
+  const operatorContext = await buildOperatorContext(context, output, sidebar);
+  const systemPrompt = [
+    "You are rewriting MAS backend findings into a clearer, more human project summary.",
+    "Stay grounded in the MAS facts provided. Do not invent architecture, findings, or results.",
+    "Prefer explaining what the repo is, how it is organized, what MAS found, and what to do next.",
+    "Avoid raw task-logger wording unless it adds value.",
+    "Do not include files_changed or code_changes unless the user explicitly asked about changes.",
+    "Return only JSON with this schema:",
+    '{"reply":"string","summary":"string|null","actions_taken":["string"],"files_in_focus":["string"],"files_changed":["string"],"code_changes":["string"],"symbols_in_focus":["string"],"suggestions":["string"],"next_step":"string|null","highlights":["string"],"cards":[{"title":"string","body":"string","action":"string|null","action_label":"string|null"}],"follow_up_actions":[{"action":"string","label":"string"}]}',
+  ].join("\n");
+  const userPrompt = [
+    `MAS context:\n${operatorContext}`,
+    `User request:\n${prompt}`,
+    `MAS backend answer:\n${backendReply.answer}`,
+    `MAS backend summary:\n${backendReply.summary ?? "(none)"}`,
+    `MAS backend actions:\n${(backendReply.actions_taken ?? []).join("\n") || "(none)"}`,
+    `MAS backend focus files:\n${(backendReply.files_in_focus ?? []).join("\n") || "(none)"}`,
+    `MAS backend suggestions:\n${(backendReply.suggestions ?? []).join("\n") || "(none)"}`,
+    `MAS backend next step:\n${backendReply.next_step ?? "(none)"}`,
+  ].join("\n\n");
+
+  const rawReply = provider.providerId === "anthropic"
+    ? await requestAnthropicReply(apiKey, provider.model, systemPrompt, userPrompt)
+    : await requestOpenAiCompatibleReply(
+      provider.baseUrl ?? "https://api.openai.com/v1",
+      apiKey,
+      provider.model,
+      systemPrompt,
+      userPrompt,
+    );
+
+  const parsed = JSON.parse(extractJsonObject(rawReply)) as {
+    reply?: string;
+    summary?: string;
+    actions_taken?: string[];
+    files_in_focus?: string[];
+    files_changed?: string[];
+    code_changes?: string[];
+    symbols_in_focus?: string[];
+    suggestions?: string[];
+    next_step?: string;
+    highlights?: string[];
+    cards?: ChatCard[];
+    follow_up_actions?: FollowUpAction[];
+  };
+
+  return {
+    answer: parsed.reply ?? backendReply.answer,
+    intent: "answer",
+    source_task_id: backendReply.source_task_id,
+    summary: parsed.summary ?? backendReply.summary,
+    actions_taken: parsed.actions_taken ?? backendReply.actions_taken ?? [],
+    files_in_focus: parsed.files_in_focus ?? backendReply.files_in_focus ?? [],
+    files_changed: parsed.files_changed ?? [],
+    code_changes: parsed.code_changes ?? [],
+    symbols_in_focus: parsed.symbols_in_focus ?? backendReply.symbols_in_focus ?? [],
+    suggestions: parsed.suggestions ?? backendReply.suggestions ?? [],
+    next_step: parsed.next_step ?? backendReply.next_step,
+    highlights: parsed.highlights ?? backendReply.highlights ?? [],
+    cards: parsed.cards ?? backendReply.cards ?? [],
+    follow_up_actions: parsed.follow_up_actions ?? backendReply.follow_up_actions ?? [],
+  };
+}
+
 async function requestOperatorReply(
   prompt: string,
   context: vscode.ExtensionContext,
@@ -1634,6 +1755,27 @@ async function requestOperatorReply(
   try {
     const backendReply = await requestBackendChatReply(prompt, context, output, sidebar);
     if (backendReply) {
+      if (
+        backendReply.intent === "answer"
+        && !backendReply.recommended_action
+        && isHighLevelSummaryPrompt(prompt)
+      ) {
+        try {
+          const rewritten = await requestExternalSummaryRewrite(
+            prompt,
+            backendReply,
+            context,
+            output,
+            sidebar,
+          );
+          if (rewritten) {
+            return rewritten;
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          output.appendLine(`External summary rewrite failed: ${message}`);
+        }
+      }
       return backendReply;
     }
   } catch (error) {
@@ -1961,7 +2103,9 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
     private readonly output: vscode.OutputChannel,
     private readonly history: ChatHistoryStore,
   ) {
-    this.selectedTaskId = this.history.getActiveTaskId() ?? this.context.globalState.get<string>("masi.lastTaskId");
+    this.selectedTaskId = this.history.hasActiveSelection()
+      ? this.history.getActiveTaskId()
+      : this.context.globalState.get<string>("masi.lastTaskId");
     this.messages = this.loadMessages(this.selectedTaskId);
     this.historySubscription = this.history.subscribe(() => {
       void this.syncFromHistory();
@@ -1985,6 +2129,8 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
         await this.startNewChat();
       } else if (type === "openChatHistory") {
         await this.openChatHistory();
+      } else if (type === "deleteChatHistory") {
+        await this.deleteChatHistory();
       } else if (type in MAS_ACTIONS) {
         const action = type as MasiAction;
         if (action === "installRuntime" || action === "startApi" || action === "healthCheck" || action === "analyzeWorkspace") {
@@ -2040,7 +2186,9 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    this.selectedTaskId = this.history.getActiveTaskId() ?? this.selectedTaskId;
+    this.selectedTaskId = this.history.hasActiveSelection()
+      ? this.history.getActiveTaskId()
+      : this.selectedTaskId;
     this.messages = this.loadMessages(this.selectedTaskId);
 
     let healthStatus = "unknown";
@@ -2084,10 +2232,10 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
       }
     }
 
-    if (!this.selectedTaskId) {
-      this.selectedTaskId = this.history.getActiveTaskId() ?? this.context.globalState.get<string>("masi.lastTaskId");
+    if (!this.selectedTaskId && !this.history.hasActiveSelection()) {
+      this.selectedTaskId = this.context.globalState.get<string>("masi.lastTaskId");
     }
-    if (!this.selectedTaskId && tasks.length > 0) {
+    if (!this.selectedTaskId && !this.history.hasActiveSelection() && tasks.length > 0) {
       await this.setActiveTask(tasks[0].task_id);
     }
     if (healthStatus === "healthy" && this.selectedTaskId) {
@@ -2147,6 +2295,50 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
       return;
     }
     await this.setActiveTask(picked.taskId);
+    await this.refresh();
+  }
+
+  public async deleteChatHistory(): Promise<void> {
+    const options = this.history.listThreads()
+      .filter((thread) => this.history.load(thread.taskId).length > 0)
+      .map((thread) => ({
+        label: thread.label,
+        description: thread.description,
+        taskId: thread.taskId,
+      }));
+    if (options.length === 0) {
+      void vscode.window.showInformationMessage("MAS does not have any saved chats to delete yet.");
+      return;
+    }
+
+    const picked = await vscode.window.showQuickPick(options, {
+      canPickMany: true,
+      placeHolder: "Choose one or more MAS chats to delete",
+      title: "Delete MAS Chats",
+    });
+    if (!picked || picked.length === 0) {
+      return;
+    }
+
+    const confirmed = await vscode.window.showWarningMessage(
+      `Delete ${picked.length} MAS chat ${picked.length === 1 ? "thread" : "threads"}?`,
+      { modal: true },
+      "Delete",
+    );
+    if (confirmed !== "Delete") {
+      return;
+    }
+
+    for (const option of picked) {
+      await this.history.deleteThread(option.taskId);
+    }
+    this.selectedTaskId = this.history.getActiveTaskId();
+    this.messages = this.history.load(this.selectedTaskId);
+    if (this.messages.length === 0) {
+      this.selectedTaskId = this.history.getActiveTaskId();
+      this.messages = this.history.load(this.selectedTaskId);
+    }
+    this.output.appendLine(`Deleted ${picked.length} MAS chat thread(s).`);
     await this.refresh();
   }
 
@@ -2234,7 +2426,9 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   private async syncFromHistory(): Promise<void> {
-    const nextTaskId = this.history.getActiveTaskId() ?? this.context.globalState.get<string>("masi.lastTaskId");
+    const nextTaskId = this.history.hasActiveSelection()
+      ? this.history.getActiveTaskId()
+      : this.context.globalState.get<string>("masi.lastTaskId");
     if (nextTaskId !== this.selectedTaskId) {
       this.selectedTaskId = nextTaskId;
     }
@@ -2378,7 +2572,9 @@ class MasiPanel {
     private readonly sidebar: MasiSidebarProvider,
     private readonly history: ChatHistoryStore,
   ) {
-    this.selectedTaskId = this.history.getActiveTaskId() ?? this.context.globalState.get<string>("masi.lastTaskId");
+    this.selectedTaskId = this.history.hasActiveSelection()
+      ? this.history.getActiveTaskId()
+      : this.context.globalState.get<string>("masi.lastTaskId");
     this.messages = this.loadMessages(this.selectedTaskId);
     this.historySubscription = this.history.subscribe(() => {
       void this.syncFromHistory();
@@ -2442,7 +2638,9 @@ class MasiPanel {
   }
 
   private async syncFromHistory(): Promise<void> {
-    const nextTaskId = this.history.getActiveTaskId() ?? this.context.globalState.get<string>("masi.lastTaskId");
+    const nextTaskId = this.history.hasActiveSelection()
+      ? this.history.getActiveTaskId()
+      : this.context.globalState.get<string>("masi.lastTaskId");
     this.selectedTaskId = nextTaskId;
     this.messages = this.loadMessages(nextTaskId);
     this.render();

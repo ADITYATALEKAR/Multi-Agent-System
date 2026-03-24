@@ -35,6 +35,7 @@ class RuntimeViolation(BaseModel):
     severity: str = "medium"
     file_path: str = ""
     message: str = ""
+    entity_id: str = ""
 
 
 class RuntimeHypothesis(BaseModel):
@@ -126,6 +127,7 @@ class MASIRuntime:
                 severity=str(item.get("severity", "medium")),
                 file_path=str(item.get("file_path", "")),
                 message=str(item.get("message", "")),
+                entity_id=str(item.get("entity_id", "")),
             )
             for idx, item in enumerate(law_stage.result.get("violations", []), start=1)
         ]

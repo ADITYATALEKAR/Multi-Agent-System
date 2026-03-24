@@ -198,6 +198,87 @@ def test_chat_summarizes_latest_task(client):
     assert "code_changes" in body
 
 
+def test_chat_can_produce_project_summary(client):
+    """Project-summary prompts should return a repo-level overview, not the generic fallback."""
+    submit = client.post("/api/v1/tasks", json={"task_type": "analysis"})
+    task_id = submit.json()["task_id"]
+    resp = client.post(
+        "/api/v1/chat",
+        json={
+            "prompt": "read my entire project and give me summary",
+            "task_id": task_id,
+            "repo_path": str(Path.cwd()),
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["intent"] == "answer"
+    assert body["source_task_id"] == task_id
+    assert "multi-agent" in body["answer"].lower() or "workspace" in body["answer"].lower()
+    assert "architecture:" in " ".join(card["title"] for card in body["cards"]).lower()
+    assert body["files_changed"] == []
+    assert body["code_changes"] == []
+
+
+def test_chat_summary_includes_top_findings_for_problem_repo(client, tmp_path):
+    """Summary-style replies should surface the main findings in human terms."""
+    repo = tmp_path / "problem-repo"
+    repo.mkdir()
+    (repo / ".venv312").mkdir()
+    (repo / ".masi_runtime").mkdir()
+    (repo / "node_modules").mkdir()
+    (repo / "temp").mkdir()
+    (repo / "vscode-extension").mkdir()
+    (repo / "vscode-extension" / "sample.vsix").write_text("placeholder", encoding="utf-8")
+
+    submit = client.post(
+        "/api/v1/tasks",
+        json={"task_type": "analysis", "repo_path": str(repo)},
+    )
+    task_id = submit.json()["task_id"]
+
+    resp = client.post(
+        "/api/v1/chat",
+        json={
+            "prompt": "give me summary",
+            "task_id": task_id,
+            "repo_path": str(repo),
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    card_titles = " ".join(card["title"] for card in body["cards"]).lower()
+    assert "top finding:" in card_titles
+    assert "top findings:" in body["answer"].lower()
+    assert "virtual-environment" in body["answer"].lower() or "vsix" in body["answer"].lower()
+
+
+def test_chat_does_not_reuse_stale_task_for_different_repo(client, tmp_path):
+    """A stale task ID from one repo should not be reused for a different workspace prompt."""
+    submit = client.post("/api/v1/tasks", json={"task_type": "analysis"})
+    task_id = submit.json()["task_id"]
+    other_repo = tmp_path / "other-repo"
+    other_repo.mkdir()
+    (other_repo / "README.md").write_text(
+        "Different repo for MAS selection test\n",
+        encoding="utf-8",
+    )
+
+    resp = client.post(
+        "/api/v1/chat",
+        json={
+            "prompt": "read my repository",
+            "task_id": task_id,
+            "repo_path": str(other_repo),
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["intent"] == "action"
+    assert body["recommended_action"] == "analyzeWorkspace"
+    assert "fresh workspace analysis" in body["answer"].lower()
+
+
 def test_chat_can_recommend_action(client):
     """Chat can return a backend-selected action recommendation."""
     resp = client.post("/api/v1/chat", json={"prompt": "analyze this workspace"})

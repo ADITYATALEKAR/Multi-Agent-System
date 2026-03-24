@@ -1,7 +1,4 @@
-"""RepoMapperAgent — maps repository structure via coordination layer.
-
-Uses src.graph.repo_mapper.RepoMapper when available; falls back to stub.
-"""
+﻿"""RepoMapperAgent maps repository structure via the coordination layer."""
 
 from __future__ import annotations
 
@@ -40,10 +37,7 @@ class RepoMapperAgent(BaseAgent):
     }
 
     def execute(self, item: WorkItem) -> Any:
-        """Map repository structure from WorkItem scope.
-
-        Tries the real RepoMapper component; returns stub on ImportError.
-        """
+        """Map repository structure from the work-item scope."""
         logger.info(
             "repo_mapper.execute",
             agent_id=self._agent_id,
@@ -52,24 +46,18 @@ class RepoMapperAgent(BaseAgent):
         )
         self.heartbeat()
 
-        try:
-            from src.graph.repo_mapper import RepoMapper
+        result = self._map_repository(item)
+        logger.info(
+            "repo_mapper.mapped",
+            nodes_mapped=result.get("nodes_mapped", 0),
+            files_scanned=result.get("repo_summary", {}).get("files_scanned", 0),
+        )
+        return result
 
-            mapper = RepoMapper()
-            node_ids = list(item.scope) if item.scope else []
-            result = mapper.map(node_ids)
-            nodes_mapped = len(result) if result else 0
-            logger.info("repo_mapper.mapped", nodes_mapped=nodes_mapped)
-            return {"nodes_mapped": nodes_mapped}
-        except (ImportError, Exception) as exc:
-            logger.warning("repo_mapper.fallback", reason=str(exc))
-            return self._fallback_map(item)
-
-    # ------------------------------------------------------------------
     def _estimate_time(self, item: WorkItem) -> float:  # noqa: ARG002
         return 2.0
 
-    def _fallback_map(self, item: WorkItem) -> dict[str, Any]:
+    def _map_repository(self, item: WorkItem) -> dict[str, Any]:
         payload = item.payload if isinstance(item.payload, dict) else {}
         raw_path = payload.get("path")
         if not raw_path:
