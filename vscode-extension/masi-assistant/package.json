@@ -2,7 +2,7 @@
   "name": "mas-agent",
   "displayName": "MAS",
   "description": "Install and control the MAS multi-agent system from VS Code.",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "publisher": "FundamentalLabs",
   "license": "SEE LICENSE IN LICENSE.txt",
   "icon": "media/mas-icon.png",
@@ -39,6 +39,7 @@
     "onCommand:masi.startApi",
     "onCommand:masi.healthCheck",
     "onCommand:masi.analyzeWorkspace",
+    "onCommand:masi.configureProvider",
     "onCommand:masi.showLastTask",
     "onCommand:masi.refreshSidebar"
   ],
@@ -64,6 +65,10 @@
       {
         "command": "masi.analyzeWorkspace",
         "title": "MAS: Analyze Current Workspace"
+      },
+      {
+        "command": "masi.configureProvider",
+        "title": "MAS: Connect To LLM"
       },
       {
         "command": "masi.showLastTask",

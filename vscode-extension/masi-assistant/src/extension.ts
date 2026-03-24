@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as http from "http";
+import * as https from "https";
 import * as path from "path";
 import * as vscode from "vscode";
 
@@ -74,6 +75,31 @@ interface FollowUpAction {
   action: string;
   label: string;
 }
+
+interface StoredAiProviderConfig {
+  providerId: string;
+  label: string;
+  model: string;
+  baseUrl?: string;
+  apiKeyConfigured: boolean;
+}
+
+interface AiProviderChoice {
+  id: string;
+  label: string;
+  defaultModel: string;
+  placeholder: string;
+  defaultBaseUrl?: string;
+}
+
+const AI_PROVIDER_CHOICES: AiProviderChoice[] = [
+  { id: "openai", label: "ChatGPT / OpenAI", defaultModel: "gpt-4.1", placeholder: "sk-...", defaultBaseUrl: "https://api.openai.com/v1" },
+  { id: "anthropic", label: "Claude / Anthropic", defaultModel: "claude-sonnet-4-20250514", placeholder: "sk-ant-..." },
+  { id: "deepseek", label: "DeepSeek", defaultModel: "deepseek-chat", placeholder: "sk-...", defaultBaseUrl: "https://api.deepseek.com/v1" },
+  { id: "kimi", label: "Kimi / Moonshot", defaultModel: "moonshot-v1-8k", placeholder: "sk-...", defaultBaseUrl: "https://api.moonshot.cn/v1" },
+  { id: "openrouter", label: "OpenRouter", defaultModel: "openai/gpt-4.1", placeholder: "sk-or-...", defaultBaseUrl: "https://openrouter.ai/api/v1" },
+  { id: "compatible", label: "Other OpenAI-compatible", defaultModel: "custom-model", placeholder: "your-api-key", defaultBaseUrl: "https://api.example.com/v1" },
+];
 
 function getConfig() {
   const config = vscode.workspace.getConfiguration("masi");
@@ -205,6 +231,89 @@ function createOutputChannel(): vscode.OutputChannel {
   return vscode.window.createOutputChannel("MAS");
 }
 
+function getAiProviderConfig(context: vscode.ExtensionContext): StoredAiProviderConfig | undefined {
+  return context.globalState.get<StoredAiProviderConfig>("masi.aiProvider");
+}
+
+function getAiProviderSummary(context: vscode.ExtensionContext): string {
+  const provider = getAiProviderConfig(context);
+  if (!provider) {
+    return "not connected";
+  }
+  const apiKeyStatus = provider.apiKeyConfigured ? "key saved" : "key missing";
+  const endpoint = provider.baseUrl ? ` | ${provider.baseUrl}` : "";
+  return `connected to ${provider.label} | ${provider.model} | ${apiKeyStatus}${endpoint}`;
+}
+
+async function configureAiProvider(
+  context: vscode.ExtensionContext,
+  output: vscode.OutputChannel,
+  sidebar?: MasiSidebarProvider,
+): Promise<void> {
+  const current = getAiProviderConfig(context);
+  const picked = await vscode.window.showQuickPick(
+    AI_PROVIDER_CHOICES.map((item) => ({
+      label: item.label,
+      description: item.defaultModel,
+      detail: item.id === current?.providerId ? "currently selected" : undefined,
+      item,
+    })),
+    {
+      title: "Connect MAS To An LLM",
+      placeHolder: "Choose the LLM provider you want MAS chat to use",
+    },
+  );
+  if (!picked) {
+    return;
+  }
+
+  const model = await vscode.window.showInputBox({
+    title: "MAS LLM Model",
+    prompt: "Enter the model name for this provider",
+    value: current?.providerId === picked.item.id ? current.model : picked.item.defaultModel,
+    ignoreFocusOut: true,
+  });
+  if (!model) {
+    return;
+  }
+
+  const needsBaseUrlInput = picked.item.id === "compatible";
+  const baseUrl = needsBaseUrlInput
+    ? await vscode.window.showInputBox({
+      title: "MAS Provider Base URL",
+      prompt: "Enter the OpenAI-compatible base URL for this provider",
+      value: current?.providerId === picked.item.id ? current.baseUrl ?? picked.item.defaultBaseUrl ?? "" : picked.item.defaultBaseUrl ?? "",
+      ignoreFocusOut: true,
+    })
+    : (picked.item.defaultBaseUrl ?? current?.baseUrl);
+
+  const apiKey = await vscode.window.showInputBox({
+    title: "MAS LLM API Key",
+    prompt: `Paste the API key for ${picked.item.label}`,
+    password: true,
+    placeHolder: picked.item.placeholder,
+    ignoreFocusOut: true,
+  });
+  if (!apiKey) {
+    return;
+  }
+
+  const providerConfig: StoredAiProviderConfig = {
+    providerId: picked.item.id,
+    label: picked.item.label,
+    model,
+    baseUrl: baseUrl?.trim() || undefined,
+    apiKeyConfigured: true,
+  };
+
+  await context.secrets.store(`masi.aiProviderKey.${picked.item.id}`, apiKey.trim());
+  await context.globalState.update("masi.aiProvider", providerConfig);
+  output.appendLine(`Updated MAS LLM provider: ${providerConfig.label} (${providerConfig.model})`);
+  void vscode.window.showInformationMessage(`MAS is now connected to ${providerConfig.label} (${providerConfig.model}).`);
+  await sidebar?.refresh();
+  MasiPanel.refreshVisible();
+}
+
 class ChatHistoryStore {
   private readonly listeners = new Set<() => void>();
 
@@ -256,11 +365,12 @@ function getDefaultChatMessages(): PanelChatMessage[] {
   return [
     {
       role: "assistant",
-      text: "MAS is ready. Ask about status, summaries, repairs, hypotheses, or tell it what to do.",
+      text: "MAS is ready. Connect an LLM once, then type instructions in English. No login flow, just your API key and your prompt.",
       followUpActions: [
         { action: "healthCheck", label: "health" },
         { action: "showLastTask", label: "last task" },
         { action: "analyzeWorkspace", label: "analyze" },
+        { action: "configureProvider", label: "connect llm" },
       ],
     },
   ];
@@ -272,6 +382,7 @@ type MasiAction =
   | "healthCheck"
   | "analyzeWorkspace"
   | "showLastTask"
+  | "configureProvider"
   | "refreshSidebar"
   | "openSidebar";
 
@@ -295,6 +406,10 @@ const MAS_ACTIONS: Record<MasiAction, { command: string; reply: string }> = {
   showLastTask: {
     command: "masi.showLastTask",
     reply: "Opening the latest MAS task summary.",
+  },
+  configureProvider: {
+    command: "masi.configureProvider",
+    reply: "Opening the LLM connection flow so you can add or change an API key and model.",
   },
   refreshSidebar: {
     command: "masi.refreshSidebar",
@@ -323,6 +438,9 @@ function resolvePromptAction(prompt: string): MasiAction | undefined {
   if (normalized.includes("last task") || normalized.includes("latest task") || normalized.includes("show task")) {
     return "showLastTask";
   }
+  if (normalized.includes("api key") || normalized.includes("provider") || normalized.includes("model")) {
+    return "configureProvider";
+  }
   if (normalized.includes("sidebar")) {
     return "openSidebar";
   }
@@ -343,6 +461,7 @@ interface ChatRenderState {
   messages: PanelChatMessage[];
   runtimeStatus: RuntimeStatus;
   healthStatus: string;
+  providerSummary: string;
   selectedTask?: TaskItem;
 }
 
@@ -368,12 +487,50 @@ function renderMessageCards(message: PanelChatMessage): string {
 
 function renderMessages(messages: PanelChatMessage[]): string {
   return messages.map((message) => `
-    <div class="message ${message.role}">
-      <div class="message-role">${message.role === 'assistant' ? 'MAS:' : 'You:'}</div>
-      <div class="message-body">${escapeHtml(message.text)}</div>
-      ${renderMessageCards(message)}
+    <div class="message-row ${message.role}">
+      <div class="message-bubble ${message.role}">
+        <div class="message-role">${message.role === 'assistant' ? 'MAS' : 'You'}</div>
+        <div class="message-body">${escapeHtml(message.text)}</div>
+        ${renderMessageCards(message)}
+      </div>
     </div>
   `).join("");
+}
+
+function renderWelcomeState(messages: PanelChatMessage[]): string {
+  const hasConversation = messages.some((message) => message.role === "user");
+  if (hasConversation) {
+    return "";
+  }
+
+  const examplePrompts = [
+    "connect to ChatGPT and use gpt-4.1",
+    "start the api and check health",
+    "analyze this workspace",
+    "summarize the latest task",
+  ];
+
+  return `
+    <div class="welcome-card">
+      <div class="welcome-kicker">welcome:</div>
+      <div class="welcome-title">Connect an LLM and tell MAS what you want.</div>
+      <div class="welcome-copy">
+        Use one API key, type in English, and let MAS translate that into the right local agent actions.
+      </div>
+      <div class="welcome-section">
+        <div class="welcome-label">try prompts:</div>
+        <div class="chip-row">
+          ${examplePrompts.map((prompt) => `
+            <button class="chip example-chip" data-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>
+          `).join("")}
+        </div>
+      </div>
+      <div class="welcome-section">
+        <div class="welcome-label">quick start:</div>
+        <div class="welcome-copy">1. connect llm  2. paste api key  3. type what you want</div>
+      </div>
+    </div>
+  `;
 }
 
 function renderTaskSummary(task: TaskItem | undefined): string {
@@ -396,7 +553,7 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
     `runtime ${state.runtimeStatus.pythonExists ? 'ready' : 'missing'}`,
     `api ${state.healthStatus}`,
   ].join(' | ');
-  const menuButtons = [
+  const systemButtons = [
     ['installRuntime', 'setup'],
     ['startApi', 'start api'],
     ['healthCheck', 'health'],
@@ -405,7 +562,11 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
   ].map(([action, label]) => `
       <button class="chip" data-action="${action}">${label}</button>
     `).join('');
+  const modelButtons = `
+      <button class="chip" data-action="configureProvider">${state.providerSummary === 'not connected' ? 'connect llm' : 'change llm'}</button>
+    `;
   const transcript = renderMessages(state.messages);
+  const welcomeState = renderWelcomeState(state.messages);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -417,59 +578,83 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
   <style>
     :root {
       --bg: #000000;
-      --panel: #050505;
-      --panel-2: #0a0a0a;
+      --panel: #070707;
+      --panel-2: #101010;
+      --panel-3: #171717;
       --border: #242424;
       --text: #ffffff;
-      --muted: #bfbfbf;
-      --soft: #8c8c8c;
+      --muted: #cfcfcf;
+      --soft: #8d8d8d;
     }
     * { box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      overflow: hidden;
+    }
     body {
       margin: 0;
-      min-height: 100vh;
       background: var(--bg);
       color: var(--text);
-      font-family: "Segoe UI", sans-serif;
-      display: flex;
-      flex-direction: column;
+      font-family: Georgia, "Times New Roman", serif;
     }
     .shell {
       display: flex;
       flex-direction: column;
-      min-height: 100vh;
+      height: 100vh;
       background: var(--bg);
     }
-    .header {
-      padding: 18px 18px 12px;
-      border-bottom: 1px solid var(--border);
-      background: var(--bg);
-    }
-    .title {
-      font-size: 14px;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }
-    .meta-stack {
+    .topbar {
+      padding: 14px 20px 10px;
       display: flex;
-      flex-direction: column;
-      gap: 8px;
-      padding: 14px 18px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
       border-bottom: 1px solid var(--border);
-      background: var(--panel);
+      background: var(--bg);
+    }
+    .brand {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+    .topbar-meta {
+      color: var(--soft);
+      font-size: 12px;
+      text-align: right;
+      font-family: "Segoe UI", sans-serif;
+    }
+    .dashboard {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      padding: 12px 20px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, #050505 0%, #020202 100%);
+    }
+    .category {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .category-label {
+      color: var(--text);
+      font-weight: 700;
+      font-size: 12px;
+      text-transform: lowercase;
+      font-family: "Segoe UI", sans-serif;
     }
     .meta-line {
       color: var(--muted);
       font-size: 12px;
       line-height: 1.5;
+      font-family: "Segoe UI", sans-serif;
     }
-    .meta-label {
-      color: var(--text);
-      font-weight: 700;
-      margin-right: 6px;
-    }
-    .menu-row, .follow-ups {
+    .chip-row, .follow-ups {
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
@@ -480,26 +665,116 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
       display: flex;
       flex-direction: column;
       min-height: 0;
+      overflow: hidden;
+      position: relative;
     }
     .messages {
       flex: 1;
       overflow-y: auto;
-      padding: 18px;
+      padding: 24px 24px 180px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 18px;
+      min-height: 0;
+      scroll-behavior: smooth;
     }
-    .message {
+    .messages-inner {
+      width: min(100%, 980px);
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .hero {
+      padding: 38px 18px 10px;
+      text-align: center;
+      color: var(--muted);
+      font-family: "Segoe UI", sans-serif;
+    }
+    .hero-title {
+      font-size: 42px;
+      line-height: 1.05;
+      color: var(--text);
+      margin-bottom: 10px;
+      font-family: Georgia, "Times New Roman", serif;
+      font-weight: 700;
+    }
+    .hero-copy {
+      font-size: 15px;
+      max-width: 560px;
+      margin: 0 auto;
+      line-height: 1.7;
+    }
+    .welcome-card {
+      width: min(100%, 760px);
+      margin: 0 auto 6px;
+      padding: 20px 22px;
       border: 1px solid var(--border);
-      background: var(--panel);
-      padding: 14px;
-      border-radius: 14px;
+      border-radius: 28px;
+      background: linear-gradient(180deg, #090909 0%, #060606 100%);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .welcome-kicker {
+      color: var(--soft);
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-family: "Segoe UI", sans-serif;
+      font-weight: 700;
+    }
+    .welcome-title {
+      font-size: 28px;
+      line-height: 1.15;
+      color: var(--text);
+    }
+    .welcome-copy {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.7;
+      font-family: "Segoe UI", sans-serif;
+    }
+    .welcome-section {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .welcome-label {
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: lowercase;
+      font-family: "Segoe UI", sans-serif;
+    }
+    .example-chip {
+      text-align: left;
+    }
+    .message-row {
+      display: flex;
+      width: 100%;
+    }
+    .message-row.assistant {
+      justify-content: flex-start;
+    }
+    .message-row.user {
+      justify-content: flex-end;
+    }
+    .message-bubble {
+      width: min(84%, 760px);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      padding: 14px 16px;
       display: flex;
       flex-direction: column;
       gap: 10px;
+      box-shadow: 0 16px 32px rgba(0, 0, 0, 0.2);
     }
-    .message.user {
-      background: var(--panel-2);
+    .message-bubble.assistant {
+      background: linear-gradient(180deg, #0a0a0a 0%, #070707 100%);
+    }
+    .message-bubble.user {
+      background: linear-gradient(180deg, #171717 0%, #111111 100%);
     }
     .message-role {
       font-size: 11px;
@@ -507,9 +782,10 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
       letter-spacing: 0.08em;
       text-transform: uppercase;
       color: var(--soft);
+      font-family: "Segoe UI", sans-serif;
     }
     .message-body {
-      font-size: 14px;
+      font-size: 17px;
       line-height: 1.65;
       white-space: pre-wrap;
     }
@@ -520,8 +796,8 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
     }
     .info-card {
       border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 12px;
+      border-radius: 16px;
+      padding: 12px 14px;
       background: #020202;
       display: flex;
       flex-direction: column;
@@ -532,45 +808,62 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
       font-size: 12px;
       font-weight: 700;
       text-transform: lowercase;
+      font-family: "Segoe UI", sans-serif;
     }
     .card-body {
       color: var(--muted);
       font-size: 13px;
       line-height: 1.55;
       white-space: pre-wrap;
+      font-family: "Segoe UI", sans-serif;
     }
     .chip {
       border: 1px solid var(--border);
-      background: transparent;
+      background: rgba(255, 255, 255, 0.02);
       color: var(--text);
       border-radius: 999px;
-      padding: 7px 10px;
+      padding: 7px 12px;
       font-size: 12px;
       cursor: pointer;
+      font-family: "Segoe UI", sans-serif;
     }
     .chip:hover {
       border-color: #ffffff;
     }
     .composer {
-      border-top: 1px solid var(--border);
-      padding: 14px 18px 18px;
-      background: var(--bg);
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      padding: 14px 20px 20px;
+      background: linear-gradient(180deg, rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, 0.94) 28%, #000000 100%);
+    }
+    .composer-shell {
+      width: min(100%, 980px);
+      margin: 0 auto;
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      background: rgba(10, 10, 10, 0.98);
+      padding: 14px;
       display: flex;
       flex-direction: column;
       gap: 10px;
+      box-shadow: 0 24px 40px rgba(0, 0, 0, 0.35);
     }
     .composer textarea {
       width: 100%;
-      min-height: 72px;
-      resize: vertical;
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      background: #050505;
+      min-height: 88px;
+      max-height: 180px;
+      resize: none;
+      border: none;
+      background: transparent;
       color: var(--text);
-      padding: 12px;
+      padding: 8px 10px 0;
       font: inherit;
-      line-height: 1.5;
+      line-height: 1.6;
+      font-size: 16px;
       outline: none;
+      font-family: "Segoe UI", sans-serif;
     }
     .composer textarea::placeholder {
       color: var(--soft);
@@ -585,36 +878,59 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
     .hint {
       color: var(--soft);
       font-size: 12px;
+      font-family: "Segoe UI", sans-serif;
     }
     .send {
       border: 1px solid #ffffff;
-      background: #111111;
+      background: #151515;
       color: #ffffff;
-      border-radius: 12px;
-      padding: 9px 14px;
+      border-radius: 14px;
+      padding: 10px 16px;
       cursor: pointer;
       font-weight: 700;
+      font-family: "Segoe UI", sans-serif;
     }
   </style>
 </head>
 <body>
   <div class="shell">
-    <div class="header">
-      <div class="title">${escapeHtml(state.title)}</div>
+    <div class="topbar">
+      <div class="brand">${escapeHtml(state.title)}</div>
+      <div class="topbar-meta">${escapeHtml(setupParts)}</div>
     </div>
-    <div class="meta-stack">
-      <div class="meta-line"><span class="meta-label">setup:</span>${escapeHtml(setupParts)}</div>
-      <div class="meta-line"><span class="meta-label">menu:</span></div>
-      <div class="menu-row">${menuButtons}</div>
-      <div class="meta-line">${renderTaskSummary(state.selectedTask)}</div>
+    <div class="dashboard">
+      <div class="category">
+        <div class="category-label">system:</div>
+        <div class="chip-row">${systemButtons}</div>
+      </div>
+      <div class="category">
+        <div class="category-label">llm:</div>
+        <div class="meta-line">${escapeHtml(state.providerSummary)}</div>
+        <div class="chip-row">${modelButtons}</div>
+      </div>
+      <div class="category">
+        <div class="category-label">task:</div>
+        <div class="meta-line">${renderTaskSummary(state.selectedTask)}</div>
+      </div>
     </div>
     <div class="chat">
-      <div class="messages">${transcript}</div>
+      <div class="messages">
+        <div class="messages-inner">
+          <div class="hero">
+            <div class="hero-title">MAS</div>
+            <div class="hero-copy">Connect an LLM, type what you want in plain English, and let MAS turn it into local agent actions.</div>
+          </div>
+          ${welcomeState}
+          ${transcript}
+        </div>
+      </div>
       <div class="composer">
-        <textarea id="promptInput" placeholder="Ask MAS about status, summary, repairs, hypotheses, or tell it what to do."></textarea>
-        <div class="composer-bottom">
-          <div class="hint">enter: send | shift+enter: new line</div>
-          <button class="send" id="sendPrompt">send</button>
+        <div class="composer-shell">
+          <textarea id="promptInput" placeholder="Tell MAS what you want in English. Example: connect to DeepSeek, start the API, then analyze this repo."></textarea>
+          <div class="composer-bottom">
+            <div class="hint">enter: send | shift+enter: new line</div>
+            <button class="send" id="sendPrompt">send</button>
+          </div>
         </div>
       </div>
     </div>
@@ -624,6 +940,15 @@ function renderChatHtml(webview: vscode.Webview, state: ChatRenderState): string
     document.querySelectorAll('[data-action]').forEach((element) => {
       element.addEventListener('click', () => {
         vscode.postMessage({ type: element.getAttribute('data-action') });
+      });
+    });
+    document.querySelectorAll('[data-prompt]').forEach((element) => {
+      element.addEventListener('click', () => {
+        const text = element.getAttribute('data-prompt');
+        if (!text) {
+          return;
+        }
+        vscode.postMessage({ type: 'prompt', text });
       });
     });
     const promptInput = document.getElementById('promptInput');
@@ -653,6 +978,7 @@ function getPanelHtml(
   messages: PanelChatMessage[],
   runtimeStatus: RuntimeStatus,
   healthStatus: string,
+  providerSummary: string,
   selectedTask?: TaskItem,
 ): string {
   return renderChatHtml(webview, {
@@ -660,6 +986,7 @@ function getPanelHtml(
     messages,
     runtimeStatus,
     healthStatus,
+    providerSummary,
     selectedTask,
   });
 }
@@ -702,7 +1029,66 @@ function requestJson<T>(method: string, path: string, body?: JsonObject): Promis
   });
 }
 
+function requestExternalJson<T>(
+  method: string,
+  rawUrl: string,
+  headers: Record<string, string>,
+  body?: JsonObject,
+): Promise<T> {
+  const target = new URL(rawUrl);
+  const payload = body ? JSON.stringify(body) : undefined;
+  const client = target.protocol === "https:" ? https : http;
+
+  return new Promise((resolve, reject) => {
+    const request = client.request(
+      {
+        method,
+        hostname: target.hostname,
+        port: target.port || (target.protocol === "https:" ? 443 : 80),
+        path: `${target.pathname}${target.search}`,
+        headers: {
+          "Content-Type": "application/json",
+          ...headers,
+          ...(payload ? { "Content-Length": Buffer.byteLength(payload) } : {}),
+        },
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        response.on("end", () => {
+          const raw = Buffer.concat(chunks).toString("utf8");
+          if (!response.statusCode || response.statusCode >= 400) {
+            reject(new Error(raw || `Request failed with status ${response.statusCode ?? "unknown"}`));
+            return;
+          }
+          resolve((raw ? JSON.parse(raw) : {}) as T);
+        });
+      },
+    );
+    request.on("error", reject);
+    if (payload) {
+      request.write(payload);
+    }
+    request.end();
+  });
+}
+
+async function getAiProviderApiKey(context: vscode.ExtensionContext): Promise<string | undefined> {
+  const provider = getAiProviderConfig(context);
+  if (!provider) {
+    return undefined;
+  }
+  return context.secrets.get(`masi.aiProviderKey.${provider.providerId}`);
+}
+
 let apiStartupPromise: Promise<boolean> | undefined;
+
+function buildStartApiCommand(pythonPath: string): string {
+  if (process.platform === "win32") {
+    return `& ${quoteForPowerShell(pythonPath)} -m uvicorn src.api.app:create_app --factory --host 127.0.0.1 --port 8000`;
+  }
+  return `"${pythonPath.replace(/"/g, '\\"')}" -m uvicorn src.api.app:create_app --factory --host 127.0.0.1 --port 8000`;
+}
 
 async function waitForApiReady(timeoutMs = 20000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
@@ -730,6 +1116,17 @@ async function startApiProcess(
   }
 
   apiStartupPromise = (async () => {
+    try {
+      await requestJson<JsonObject>("GET", "/health");
+      output.appendLine("MAS API is already healthy on http://127.0.0.1:8000.");
+      await sidebar.refresh();
+      return true;
+    } catch (error) {
+      if (!isConnectionRefusedError(error)) {
+        throw error;
+      }
+    }
+
     const repoRoot = await ensureRepoRootConfigured();
     if (!repoRoot) {
       return false;
@@ -752,7 +1149,7 @@ async function startApiProcess(
     if (options.revealTerminal) {
       terminal.show(true);
     }
-    terminal.sendText(`"${pythonPath}" -m uvicorn src.api.app:create_app --factory --host 127.0.0.1 --port 8000`, true);
+    terminal.sendText(buildStartApiCommand(pythonPath), true);
     output.appendLine(`Starting MAS API in ${repoRoot} (${options.reason}).`);
 
     const ready = await waitForApiReady();
@@ -844,6 +1241,7 @@ async function requestBackendChatReply(
 ): Promise<BackendChatResponse | undefined> {
   const runtimeStatus = getRuntimeStatus();
   const fallbackAction = resolvePromptAction(prompt);
+  const provider = getAiProviderConfig(context);
   const apiReady = await ensureApiAvailable(output, sidebar, {
     revealTerminal: false,
     reason: "backend chat query",
@@ -871,10 +1269,192 @@ async function requestBackendChatReply(
 
   return requestJson<BackendChatResponse>("POST", "/api/v1/chat", {
     prompt,
-    tenant_id: "default",
     task_id: context.globalState.get<string>("masi.lastTaskId") ?? "",
     repo_path: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "",
+    provider: provider?.providerId ?? "",
+    model: provider?.model ?? "",
   });
+}
+
+function extractJsonObject(raw: string): string {
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) {
+    return fenced[1].trim();
+  }
+  const firstBrace = raw.indexOf("{");
+  const lastBrace = raw.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return raw.slice(firstBrace, lastBrace + 1);
+  }
+  return raw.trim();
+}
+
+async function buildOperatorContext(
+  context: vscode.ExtensionContext,
+  output: vscode.OutputChannel,
+  sidebar: MasiSidebarProvider,
+): Promise<string> {
+  const runtimeStatus = getRuntimeStatus();
+  const parts = [
+    `repo_root=${runtimeStatus.repoRoot || "(unset)"}`,
+    `runtime_ready=${runtimeStatus.pythonExists}`,
+    `workspace=${vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "(none)"}`,
+    `last_task_id=${context.globalState.get<string>("masi.lastTaskId") ?? "(none)"}`,
+  ];
+
+  try {
+    const apiReady = await ensureApiAvailable(output, sidebar, {
+      revealTerminal: false,
+      reason: "llm context refresh",
+    });
+    parts.push(`api_ready=${apiReady}`);
+    if (apiReady) {
+      const health = await requestJson<JsonObject>("GET", "/health");
+      parts.push(`api_status=${String(health.status ?? "unknown")}`);
+      const tasks = await requestJson<TaskItem[]>("GET", "/api/v1/tasks?limit=1");
+      if (tasks.length > 0) {
+        const task = tasks[0];
+        parts.push(`latest_task=${task.task_id}`);
+        parts.push(`latest_task_status=${task.status}`);
+        parts.push(`latest_task_repo=${task.repo_path}`);
+        parts.push(`latest_task_violations=${task.violations.length}`);
+        parts.push(`latest_task_repairs=${task.repairs.length}`);
+      }
+    }
+  } catch (error) {
+    parts.push(`api_context_error=${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  return parts.join("\n");
+}
+
+async function requestOpenAiCompatibleReply(
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  systemPrompt: string,
+  userPrompt: string,
+): Promise<string> {
+  type OpenAiMessage = { role: string; content: string };
+  const response = await requestExternalJson<{
+    choices?: Array<{ message?: OpenAiMessage }>;
+  }>(
+    "POST",
+    `${baseUrl.replace(/\/$/, "")}/chat/completions`,
+    {
+      Authorization: `Bearer ${apiKey}`,
+    },
+    {
+      model,
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+    },
+  );
+  return String(response.choices?.[0]?.message?.content ?? "");
+}
+
+async function requestAnthropicReply(
+  apiKey: string,
+  model: string,
+  systemPrompt: string,
+  userPrompt: string,
+): Promise<string> {
+  const response = await requestExternalJson<{
+    content?: Array<{ type?: string; text?: string }>;
+  }>(
+    "POST",
+    "https://api.anthropic.com/v1/messages",
+    {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    {
+      model,
+      max_tokens: 500,
+      system: systemPrompt,
+      messages: [
+        { role: "user", content: userPrompt },
+      ],
+    },
+  );
+  return String(response.content?.find((item) => item.type === "text")?.text ?? "");
+}
+
+async function requestExternalLlmReply(
+  prompt: string,
+  context: vscode.ExtensionContext,
+  output: vscode.OutputChannel,
+  sidebar: MasiSidebarProvider,
+): Promise<BackendChatResponse | undefined> {
+  const provider = getAiProviderConfig(context);
+  const apiKey = await getAiProviderApiKey(context);
+  if (!provider || !apiKey) {
+    return undefined;
+  }
+
+  const operatorContext = await buildOperatorContext(context, output, sidebar);
+  const systemPrompt = [
+    "You are the natural-language interface for MAS, a local software intelligence agent.",
+    "Your job is to convert plain English into one of the supported MAS actions when appropriate, otherwise answer briefly and clearly.",
+    "Supported actions: installRuntime, startApi, healthCheck, analyzeWorkspace, showLastTask, configureProvider.",
+    "Return only JSON with this schema:",
+    '{"reply":"string","action":"installRuntime|startApi|healthCheck|analyzeWorkspace|showLastTask|configureProvider|null","highlights":["string"],"cards":[{"title":"string","body":"string","action":"string|null","action_label":"string|null"}],"follow_up_actions":[{"action":"string","label":"string"}]}',
+    "Do not mention tenants, logins, or passwords. MAS is single-user and local.",
+    "If the user asks to connect an LLM, configure a provider, set an API key, or change models, choose configureProvider.",
+  ].join("\n");
+  const userPrompt = `MAS context:\n${operatorContext}\n\nUser request:\n${prompt}`;
+
+  const rawReply = provider.providerId === "anthropic"
+    ? await requestAnthropicReply(apiKey, provider.model, systemPrompt, userPrompt)
+    : await requestOpenAiCompatibleReply(provider.baseUrl ?? "https://api.openai.com/v1", apiKey, provider.model, systemPrompt, userPrompt);
+
+  const parsed = JSON.parse(extractJsonObject(rawReply)) as {
+    reply?: string;
+    action?: string | null;
+    highlights?: string[];
+    cards?: ChatCard[];
+    follow_up_actions?: FollowUpAction[];
+  };
+
+  return {
+    answer: parsed.reply ?? "I connected to your LLM, but the reply was empty.",
+    intent: parsed.action ? "action" : "answer",
+    recommended_action: parsed.action ?? undefined,
+    source_task_id: context.globalState.get<string>("masi.lastTaskId") ?? undefined,
+    highlights: parsed.highlights ?? [],
+    cards: parsed.cards ?? [],
+    follow_up_actions: parsed.follow_up_actions ?? [],
+  };
+}
+
+async function requestOperatorReply(
+  prompt: string,
+  context: vscode.ExtensionContext,
+  output: vscode.OutputChannel,
+  sidebar: MasiSidebarProvider,
+): Promise<BackendChatResponse | undefined> {
+  try {
+    const externalReply = await requestExternalLlmReply(prompt, context, output, sidebar);
+    if (externalReply) {
+      return externalReply;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    output.appendLine(`External LLM request failed: ${message}`);
+    return {
+      answer: `I could not reach your connected LLM: ${message}. Use "connect llm" to update the API key, model, or provider settings.`,
+      intent: "action",
+      recommended_action: "configureProvider",
+      follow_up_actions: [
+        { action: "configureProvider", label: "connect llm" },
+      ],
+    };
+  }
+  return requestBackendChatReply(prompt, context, output, sidebar);
 }
 
 class MasiSidebarProvider implements vscode.WebviewViewProvider {
@@ -1121,7 +1701,7 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
     await this.persistMessages();
   }
 
-  private async runAction(action: Extract<MasiAction, "installRuntime" | "startApi" | "healthCheck" | "analyzeWorkspace">): Promise<void> {
+  private async runAction(action: Extract<MasiAction, "installRuntime" | "startApi" | "healthCheck" | "analyzeWorkspace" | "configureProvider">): Promise<void> {
     await this.appendMessage("assistant", MAS_ACTIONS[action].reply);
     await vscode.commands.executeCommand(MAS_ACTIONS[action].command);
   }
@@ -1138,7 +1718,7 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
   private async handlePrompt(prompt: string): Promise<void> {
     await this.appendMessage("user", prompt);
     try {
-      const smartReply = await requestBackendChatReply(prompt, this.context, this.output, this);
+      const smartReply = await requestOperatorReply(prompt, this.context, this.output, this);
       if (smartReply) {
         if (smartReply.source_task_id) {
           if (smartReply.source_task_id !== this.selectedTaskId) {
@@ -1155,7 +1735,7 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
           const action = smartReply.recommended_action as MasiAction;
           if (action === "showLastTask") {
             await vscode.commands.executeCommand(MAS_ACTIONS[action].command);
-          } else if (action === "installRuntime" || action === "startApi" || action === "healthCheck" || action === "analyzeWorkspace") {
+          } else if (action === "installRuntime" || action === "startApi" || action === "healthCheck" || action === "analyzeWorkspace" || action === "configureProvider") {
             await vscode.commands.executeCommand(MAS_ACTIONS[action].command);
           }
         }
@@ -1174,7 +1754,7 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
     if (!action || action === "showLastTask" || action === "refreshSidebar" || action === "openSidebar") {
       await this.appendMessage(
         "assistant",
-        "I can answer repo/status/task questions, or help with: install runtime, start API, run health check, analyze the current workspace, or show the last task from the command palette.",
+        "I can answer repo/status/task questions, or help with: install runtime, start API, run health check, analyze the current workspace, show the last task, or set up an AI provider.",
       );
       await this.refresh();
       return;
@@ -1194,6 +1774,7 @@ class MasiSidebarProvider implements vscode.WebviewViewProvider {
       messages: this.messages,
       runtimeStatus,
       healthStatus,
+      providerSummary: getAiProviderSummary(this.context),
       selectedTask,
     });
   }
@@ -1204,6 +1785,10 @@ class MasiPanel {
   private messages: PanelChatMessage[];
   private selectedTaskId?: string;
   private readonly historySubscription: vscode.Disposable;
+
+  public static refreshVisible(): void {
+    MasiPanel.currentPanel?.render();
+  }
 
   public static createOrShow(
     context: vscode.ExtensionContext,
@@ -1268,6 +1853,7 @@ class MasiPanel {
       this.messages,
       getRuntimeStatus(),
       "unknown",
+      getAiProviderSummary(this.context),
     );
   }
 
@@ -1322,7 +1908,7 @@ class MasiPanel {
     await this.appendMessage("user", prompt);
 
     try {
-      const smartReply = await requestBackendChatReply(prompt, this.context, this.output, this.sidebar);
+      const smartReply = await requestOperatorReply(prompt, this.context, this.output, this.sidebar);
       if (smartReply) {
         if (smartReply.source_task_id) {
           await this.setActiveTask(smartReply.source_task_id);
@@ -1356,7 +1942,7 @@ class MasiPanel {
 
     await this.appendMessage(
       "assistant",
-      "I can help with: install runtime, start API, run health check, analyze the current workspace, show the last task, or open the sidebar.",
+      "I can help with: install runtime, start API, run health check, analyze the current workspace, show the last task, open the sidebar, or set up an AI provider.",
     );
   }
 }
@@ -1489,6 +2075,12 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand("masi.analyzeWorkspace", async () => {
       await runAnalyzeWorkspace(context, output, sidebar);
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("masi.configureProvider", async () => {
+      await configureAiProvider(context, output, sidebar);
     }),
   );
 

@@ -165,6 +165,21 @@ class RuntimeChatService:
                     RuntimeChatAction(action="showLastTask", label="open task"),
                 ],
             )
+        if any(
+            token in normalized_prompt
+            for token in {"llm", "api key", "provider", "chatgpt", "claude", "deepseek", "kimi"}
+        ):
+            return RuntimeChatReply(
+                answer=(
+                    "I should open the LLM connection flow so you can paste an API key,"
+                    " choose a model, and then type plain-English instructions."
+                ),
+                intent="action",
+                recommended_action="configureProvider",
+                follow_up_actions=[
+                    RuntimeChatAction(action="configureProvider", label="connect llm"),
+                ],
+            )
         return None
 
     def _answer_status(self, recent_tasks: list[RuntimeTask]) -> RuntimeChatReply:

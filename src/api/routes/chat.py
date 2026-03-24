@@ -23,9 +23,10 @@ class ChatIntent(StrEnum):
 
 class ChatRequest(BaseModel):
     prompt: str = Field(..., description="Operator prompt to answer")
-    tenant_id: str = "default"
     task_id: str | None = None
     repo_path: str | None = None
+    provider: str | None = None
+    model: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -45,15 +46,15 @@ def chat(request: ChatRequest) -> ChatResponse:
     service = RuntimeChatService(runtime)
     reply = service.answer(
         prompt=request.prompt,
-        tenant_id=request.tenant_id,
         task_id=request.task_id,
         repo_path=request.repo_path,
     )
     log.info(
         "chat_answered",
-        tenant_id=request.tenant_id,
         task_id=reply.source_task_id,
         intent=reply.intent,
+        provider=request.provider,
+        model=request.model,
     )
     return ChatResponse(
         answer=reply.answer,

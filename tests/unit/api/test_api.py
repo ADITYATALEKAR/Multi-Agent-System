@@ -185,6 +185,16 @@ def test_chat_can_recommend_action(client):
     assert body["follow_up_actions"][0]["action"] == "analyzeWorkspace"
 
 
+def test_chat_can_recommend_llm_connection(client):
+    """Chat can direct the user into the simple LLM connection flow."""
+    resp = client.post("/api/v1/chat", json={"prompt": "connect MAS to ChatGPT with my API key"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["intent"] == "action"
+    assert body["recommended_action"] == "configureProvider"
+    assert body["follow_up_actions"][0]["action"] == "configureProvider"
+
+
 # ---------------------------------------------------------------------------
 # Auth middleware
 # ---------------------------------------------------------------------------
