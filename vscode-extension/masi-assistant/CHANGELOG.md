@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.0.9
+
+- Aligned the MAS release flow with the backend project-summary fix so fresh workspace analysis completes before MAS summarizes the repo.
+- Packaged the latest extension build to pair with backend commit `523ab42`; restart the MAS API after pulling the latest repo changes.
+
+## 0.0.8
+
+- Fixed the MAS prompt box so drafts no longer disappear while typing during sidebar refreshes.
+- Simplified the top bar by removing the live readiness status line.
+- Refined the workspace panel so controls stay tucked under the `workspace` toggle.
+
 ## 0.0.7
 
 - Upgraded MAS chat into a more agent-like teammate with structured `summary`, `actions taken`, `files changed`, `code changes`, `suggestions`, and `next step` sections.
