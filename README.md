@@ -147,26 +147,6 @@ Good for:
 - one-command setup script
 - optional Docker/self-hosted guide
 
-## Safety
-
-The repo is set up to avoid committing local secrets and runtime data:
-
-- `.env*` ignored
-- `.venv*` ignored
-- `.masi_runtime/` ignored
-- `temp/` ignored
-- `*.vsix` ignored
-- certificate and key files ignored
-
-## Development Checks
-
-```powershell
-.\.venv312\Scripts\lint-imports.exe
-.\.venv312\Scripts\python.exe -m ruff check src tests
-.\.venv312\Scripts\python.exe -m pytest tests\unit -q
-.\.venv312\Scripts\python.exe -m pytest tests\integration -q
-```
-
 ## Marketplace
 
 Publishing steps for the extension are in:
