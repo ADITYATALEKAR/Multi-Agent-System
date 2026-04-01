@@ -1,7 +1,9 @@
-# MAS<img width="1257" height="1723" alt="image" src="https://github.com/user-attachments/assets/da827b40-4e11-46ae-9171-94e7f6049471" />
-
-<img width="1257" height="1723" alt="image" src="https://github.com/user-attachments/assets/7f5ea73c-6483-4732-a2d4-8d9f1ae91161" />
+# MAS
 <img width="1760" height="1715" alt="image" src="https://github.com/user-attachments/assets/1e46166e-8832-42cd-8616-a56d17f74095" />
+<img width="1257" height="1723" alt="image" src="https://github.com/user-attachments/assets/da827b40-4e11-46ae-9171-94e7f6049471" />
+
+
+
 
 MAS is a multi-agent software intelligence system for analyzing repositories, surfacing architecture issues, and turning plain-English operator requests into concrete local actions.
 
